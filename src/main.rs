@@ -132,25 +132,36 @@ fn main() {
     syst.set_reload(8_000_000);
     syst.enable_interrupt();
     syst.enable_counter();
+
+    /* enable GPIOA, GPIOB and AFIO */
     rcc.apb2enr.modify(|_, w| w.iopaen().enabled()
                                 .iopben().enabled()
                                 .afioen().enabled());
+
+    /* GPIO */
+    /* enable PA0-2 for manipulating shift register */
     gpioa.crl.modify(|_, w|
         w.mode0().output().cnf0().push()
          .mode1().output().cnf1().push()
          .mode2().output().cnf2().push());
 
+    /* enable PB6 and PB7 for I2C1 */
     gpiob.crl.modify(|_, w|
         w.mode6().output50().cnf6().alt_open()
          .mode7().output50().cnf7().alt_open());
 
+    /* I2C */
+    /* enable and reset I2C1 */
     rcc.apb1enr.modify(|_, w| w.i2c1en().enabled());
+    rcc.apb1rstr.modify(|_, w| w.i2c1rst().set_bit());
+    rcc.apb1rstr.modify(|_, w| w.i2c1rst().clear_bit());
 
     unsafe {
         RTC = Some(ds3231::DS3231::new(i2c, rcc));
         SR = Some(ShiftRegister::new(gpioa, 24));
         SR.as_mut().unwrap().output_bits(0);
         let rtc = RTC.as_mut().unwrap();
+        /* initialize the ds3231 */
         rtc.init();
         /*
         rtc.write_fulldate(&ds3231::Date{second: 30,

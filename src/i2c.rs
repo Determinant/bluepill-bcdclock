@@ -15,6 +15,7 @@ const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
 const CCR_CCR_SET: u16 = 0x0FFF;
 const CCR_FS_SET: u16 = 0x8000;
+const CCR_DUTY_SET: u16 = 0x4000;
 const CR1_CLEAR_MASK: u16 = 0xFBF5;
 const I2C_ACK_ENABLE: u16 = 0x0400;
 
@@ -64,12 +65,10 @@ impl<'a> I2C<'a> {
         pclk1_freq
     }
 
-    /// TODO: support for standard mode (100khz)
-    pub fn init(&self) {
+    /// TODO: support for standard mode
+    pub fn init(&self, freq: u32, duty: bool) {
         let i2c = &self.i2c;
         unsafe {
-            self.rcc.apb1rstr.modify(|_, w| w.i2c1rst().set_bit());
-            self.rcc.apb1rstr.modify(|_, w| w.i2c1rst().clear_bit());
             self.pe(true); /* PE = 1, enable I2C */
             /* CR2 configuration */
             let pclk1 = self.get_pclk1();
@@ -77,7 +76,10 @@ impl<'a> I2C<'a> {
             i2c.cr2.modify(|r, w| w.bits(r.bits()).freq().bits(freq_range as u8));
             /* CCR configuration */
             self.pe(false);
-            let mut res = (pclk1 / (400000 * 3)) as u16;
+            let mut res = match duty {
+                true => (pclk1 / (freq * (16 + 9))) as u16 | CCR_DUTY_SET,
+                false => (pclk1 / (freq * (2 + 1))) as u16
+            };
             if (res & CCR_CCR_SET) == 0 {
                 res |= 0x0001;
             }

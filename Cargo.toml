@@ -1,6 +1,6 @@
 [package]
-name = "bluepill-ds3231"
-description = "Test the communication with DS3231"
+name = "bluepill-bcdclock"
+description = "A BCD clock using DS3231"
 authors = ["Ted Yin <tederminant@gmail.com>"]
 keywords = ["no-std", "arm", "cortex-m", "stm32"]
 license = "GPL-3.0"

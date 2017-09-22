@@ -37,7 +37,7 @@ impl<'a> DS3231<'a> {
 
     pub fn init(&self) {
         let i2c = &self.i2c;
-        i2c.init();
+        i2c.init(400_000, true);
         i2c.start(true, true);
         i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
         i2c.send(DS3231_REG_CTL, true);
