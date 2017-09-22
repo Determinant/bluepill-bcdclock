@@ -43,7 +43,7 @@ impl<'a> I2C<'a> {
             SWSR::PLL => {
                 let pllmull = cfgr.pllmul().bits();
                 let pllsource = cfgr.pllsrc();
-                let pllmull = (pllmull as u32 >> 18) + 2;
+                let pllmull = pllmull as u32 + 2;
                 match pllsource {
                     PLLSRCR::INTERNAL => {
                         (HSI_VALUE >> 1) * pllmull
