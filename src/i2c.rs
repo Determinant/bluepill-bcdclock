@@ -20,6 +20,7 @@ const I2C_ACK_ENABLE: u16 = 0x0400;
 
 pub struct I2C<'a> {
     i2c: &'a stm32f103xx::i2c1::RegisterBlock,
+    rcc: &'a stm32f103xx::rcc::RegisterBlock,
 }
 
 pub enum TransDir {
@@ -28,52 +29,50 @@ pub enum TransDir {
 }
 
 impl<'a> I2C<'a> {
-    pub fn new(reg: &'a stm32f103xx::i2c1::RegisterBlock) -> I2C<'a> {
-        I2C{i2c: reg}
+    pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock,
+               rcc_reg: &'a stm32f103xx::rcc::RegisterBlock) -> I2C<'a> {
+        I2C{i2c: i2c_reg, rcc: rcc_reg}
     }
 
-    fn get_pclk1() -> u32 {
-        unsafe {
-            use stm32f103xx::rcc::cfgr::{SWSR, PLLSRCR, PLLXTPRER};
-            let rcc: &stm32f103xx::rcc::RegisterBlock = &*RCC.get();
-            let cfgr = rcc.cfgr.read();
-            let sysclk_freq = match cfgr.sws() {
-                SWSR::HSI => HSI_VALUE,
-                SWSR::HSE => HSE_VALUE,
-                SWSR::PLL => {
-                    let pllmull = cfgr.pllmul().bits();
-                    let pllsource = cfgr.pllsrc();
-                    let pllmull = (pllmull as u32 >> 18) + 2;
-                    match pllsource {
-                        PLLSRCR::INTERNAL => {
-                            (HSI_VALUE >> 1) * pllmull
-                        },
-                        PLLSRCR::EXTERNAL => {
-                            match cfgr.pllxtpre() {
-                                PLLXTPRER::DIV2 => (HSE_VALUE >> 1) * pllmull,
-                                PLLXTPRER::DIV1 => HSE_VALUE * pllmull
-                            }
+    fn get_pclk1(&self) -> u32 {
+        use stm32f103xx::rcc::cfgr::{SWSR, PLLSRCR, PLLXTPRER};
+        let cfgr = self.rcc.cfgr.read();
+        let sysclk_freq = match cfgr.sws() {
+            SWSR::HSI => HSI_VALUE,
+            SWSR::HSE => HSE_VALUE,
+            SWSR::PLL => {
+                let pllmull = cfgr.pllmul().bits();
+                let pllsource = cfgr.pllsrc();
+                let pllmull = (pllmull as u32 >> 18) + 2;
+                match pllsource {
+                    PLLSRCR::INTERNAL => {
+                        (HSI_VALUE >> 1) * pllmull
+                    },
+                    PLLSRCR::EXTERNAL => {
+                        match cfgr.pllxtpre() {
+                            PLLXTPRER::DIV2 => (HSE_VALUE >> 1) * pllmull,
+                            PLLXTPRER::DIV1 => HSE_VALUE * pllmull
                         }
                     }
                 }
-                _ => HSI_VALUE
-            };
-            let div_table: [u8; 16] = [0, 0, 0, 0, 1, 2, 3, 4, 1, 2, 3, 4, 6, 7, 8, 9];
-            let hclk_freq = sysclk_freq >> div_table[cfgr.hpre().bits() as usize];
-            let pclk1_freq = hclk_freq >> div_table[cfgr.ppre1().bits() as usize];
-            pclk1_freq
-        }
+            }
+            _ => HSI_VALUE
+        };
+        let div_table: [u8; 16] = [0, 0, 0, 0, 1, 2, 3, 4, 1, 2, 3, 4, 6, 7, 8, 9];
+        let hclk_freq = sysclk_freq >> div_table[cfgr.hpre().bits() as usize];
+        let pclk1_freq = hclk_freq >> div_table[cfgr.ppre1().bits() as usize];
+        pclk1_freq
     }
 
+    /// TODO: support for standard mode (100khz)
     pub fn init(&self) {
         let i2c = &self.i2c;
         unsafe {
-            let rcc: &stm32f103xx::rcc::RegisterBlock = &*RCC.get();
-            rcc.apb1rstr.modify(|_, w| w.i2c1rst().set_bit());
-            rcc.apb1rstr.modify(|_, w| w.i2c1rst().clear_bit());
+            self.rcc.apb1rstr.modify(|_, w| w.i2c1rst().set_bit());
+            self.rcc.apb1rstr.modify(|_, w| w.i2c1rst().clear_bit());
             self.pe(true); /* PE = 1, enable I2C */
             /* CR2 configuration */
-            let pclk1 = I2C::get_pclk1();
+            let pclk1 = self.get_pclk1();
             let freq_range: u16 = (pclk1 / 1000000) as u16;
             i2c.cr2.modify(|r, w| w.bits(r.bits()).freq().bits(freq_range as u8));
             /* CCR configuration */
@@ -84,7 +83,7 @@ impl<'a> I2C<'a> {
             }
             /* TRISE configuration */
             i2c.trise.write(|w| w.bits(((freq_range * 300) / 1000 + 1) as u32));
-            i2c.ccr.modify(|r, w| w.bits((res | CCR_FS_SET) as u32));
+            i2c.ccr.write(|w| w.bits((res | CCR_FS_SET) as u32));
             self.pe(true); /* PE = 1, enable I2C */
             /* CR1 configuration */
             i2c.cr1.modify(|r, w| w.bits(((r.bits() as u16 & CR1_CLEAR_MASK) | I2C_ACK_ENABLE) as u32));

@@ -12,17 +12,21 @@ struct ShiftRegister<'a> {
     width: u8,
 }
 
+struct Clock {
+    sec: u8,
+    min: u8,
+    hr: u8,
+    reset: u8
+}
+
+const RESET_PERIOD: u8 = 10;
 static mut SR: Option<ShiftRegister> = None;
 static mut RTC: Option<ds3231::DS3231> = None;
-static mut N: u16 = 0;
 static mut DIGITS: [u8; 6] = [0; 6];
+static mut TIME: Clock = Clock{sec: 0, min: 0, hr: 0, reset: 0};
 
-fn systick_handler() {
+fn update_clock() {
     unsafe {
-        /*
-        SR.as_mut().unwrap().output_bits(N as u32);
-        N += 1;
-        */
         /*
         SR.as_mut().unwrap().output_bits(digits2bcds(&DIGITS[..]));
         let mut i = 0;
@@ -33,12 +37,26 @@ fn systick_handler() {
             i += 1;
         }
         */
-        let ds3231::Date{second: sec, minute: min, hour: hr, ..} = RTC.as_mut().unwrap().read_fulldate();
-        DIGITS[4] = sec / 10; DIGITS[5] = sec % 10;
-        DIGITS[2] = min / 10; DIGITS[3] = min % 10;
-        DIGITS[0] = hr / 10; DIGITS[1] = hr % 10;
+        if !TIME.tick() {
+            let ds3231::Date{second: sec,
+                            minute: min,
+                            hour: hr, ..} = RTC.as_mut().unwrap()
+                                                .read_fulldate();
+            TIME = Clock{sec: sec,
+                        min: min,
+                        hr: hr,
+                        reset: RESET_PERIOD};
+        }
+
+        DIGITS[4] = TIME.sec / 10; DIGITS[5] = TIME.sec - DIGITS[4] * 10;
+        DIGITS[2] = TIME.min / 10; DIGITS[3] = TIME.min - DIGITS[2] * 10;
+        DIGITS[0] = TIME.hr / 10; DIGITS[1] = TIME.hr - DIGITS[0] * 10;
         SR.as_mut().unwrap().output_bits(digits2bcds(&DIGITS[..]));
     }
+}
+
+fn systick_handler() {
+    update_clock();
 }
 
 exception!(SYS_TICK, systick_handler);
@@ -77,6 +95,31 @@ fn digits2bcds(digs: &[u8]) -> u32 {
     res
 }
 
+impl Clock {
+    fn tick(&mut self) -> bool {
+        if self.reset == 0 {
+            return false;
+        }
+
+        self.sec += 1;
+        if self.sec == 60 {
+            self.min += 1;
+            self.sec = 0;
+        }
+
+        if self.min == 60 {
+            self.hr += 1;
+            self.min = 0;
+        }
+
+        if self.hr == 24 {
+            self.hr = 0;
+        }
+        self.reset -= 1;
+        true
+    }
+}
+
 fn main() {
 
     let gpioa: &stm32f103xx::gpioa::RegisterBlock = unsafe { &*GPIOA.get() };
@@ -86,7 +129,7 @@ fn main() {
     let syst: &cortex_m::peripheral::SYST = unsafe { &*SYST.get() };
 
     syst.set_clock_source(SystClkSource::Core);
-    syst.set_reload(100_000);
+    syst.set_reload(8_000_000);
     syst.enable_interrupt();
     syst.enable_counter();
     rcc.apb2enr.modify(|_, w| w.iopaen().enabled()
@@ -104,12 +147,11 @@ fn main() {
     rcc.apb1enr.modify(|_, w| w.i2c1en().enabled());
 
     unsafe {
-        RTC = Some(ds3231::DS3231::new(i2c));
+        RTC = Some(ds3231::DS3231::new(i2c, rcc));
         SR = Some(ShiftRegister::new(gpioa, 24));
         SR.as_mut().unwrap().output_bits(0);
         let rtc = RTC.as_mut().unwrap();
         rtc.init();
-        let x = rtc.read_fulldate();
         /*
         rtc.write_fulldate(&ds3231::Date{second: 30,
                                 minute: 48,
@@ -122,4 +164,6 @@ fn main() {
                                 am_enable: false});
         */
     }
+
+    update_clock();
 }

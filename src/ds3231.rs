@@ -22,8 +22,9 @@ pub struct Date {
 }
 
 impl<'a> DS3231<'a> {
-    pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock) -> DS3231<'a> {
-        DS3231{i2c: I2C::new(i2c_reg)}
+    pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock,
+               rcc_reg: &'a stm32f103xx::rcc::RegisterBlock) -> DS3231<'a> {
+        DS3231{i2c: I2C::new(i2c_reg, rcc_reg)}
     }
 
     fn bcd2dec(bcd: u8) -> u8 {
