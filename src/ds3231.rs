@@ -1,5 +1,5 @@
 extern crate stm32f103xx;
-use ::i2c::{I2C, TransDir};
+use ::i2c::{I2C, TransDir, DutyType};
 
 const DS3231_ADDR: u8 = 0b1101000;
 const DS3231_REG_SEC: u8 = 0x00;
@@ -18,7 +18,7 @@ pub struct Date {
     pub month: u8,
     pub year: u8,
     pub am: bool,
-    pub am_enable: bool
+    pub am_enabled: bool
 }
 
 impl<'a> DS3231<'a> {
@@ -37,7 +37,7 @@ impl<'a> DS3231<'a> {
 
     pub fn init(&self) {
         let i2c = &self.i2c;
-        i2c.init(400_000, true);
+        i2c.init(0x01, 400_000, DutyType::DUTY1);
         i2c.start(true, true);
         i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
         i2c.send(DS3231_REG_CTL, true);
@@ -62,13 +62,13 @@ impl<'a> DS3231<'a> {
         i2c.conf_ack(false); /* disable ack (send nack) */
         buf[6] = i2c.recv(true);
         i2c.stop(true);
-        let am_enable = (buf[2] >> 6) & 1 == 1;
-        let hour = if am_enable {
+        let am_enabled = (buf[2] >> 6) & 1 == 1;
+        let hour = if am_enabled {
             (buf[2] & 0x0f) + ((buf[2] >> 4) & 1) * 10
         } else {
             DS3231::bcd2dec(buf[2])
         };
-        let am = if am_enable {(buf[2] >> 5) & 1 == 0} else {hour < 12};
+        let am = if am_enabled {(buf[2] >> 5) & 1 == 0} else {hour < 12};
         Date{second: DS3231::bcd2dec(buf[0]),
              minute: DS3231::bcd2dec(buf[1]),
              hour: hour,
@@ -77,14 +77,14 @@ impl<'a> DS3231<'a> {
              month: DS3231::bcd2dec(buf[5]),
              year: DS3231::bcd2dec(buf[6]),
              am: am,
-             am_enable: am_enable}
+             am_enabled: am_enabled}
     }
 
     pub fn write_fulldate(&self, date: &Date) {
         let i2c = &self.i2c;
-        let hour = if date.am_enable {
+        let hour = if date.am_enabled {
             (1 << 6) | ((if date.am {0} else {1}) << 5) |
-            ((date.hour % 10) << 4) | (date.hour & 0x0f)
+            ((date.hour / 10) << 4) | (date.hour % 10)
         } else {
             DS3231::dec2bcd(date.hour)
         };

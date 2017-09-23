@@ -25,9 +25,16 @@ static mut RTC: Option<ds3231::DS3231> = None;
 static mut DIGITS: [u8; 6] = [0; 6];
 static mut TIME: Clock = Clock{sec: 0, min: 0, hr: 0, reset: 0};
 
-fn update_clock() {
+fn digits2bcds(digs: &[u8]) -> u32 {
+    let mut res: u32 = 0;
+    for d in digs.iter().rev() {
+        res = (res << 4) | (*d as u32);
+    }
+    res
+}
+
+fn digits_countup() {
     unsafe {
-        /*
         SR.as_mut().unwrap().output_bits(digits2bcds(&DIGITS[..]));
         let mut i = 0;
         let mut carry = 1;
@@ -36,7 +43,11 @@ fn update_clock() {
             carry = if DIGITS[i] > 9 {DIGITS[i] = 0; 1} else {0};
             i += 1;
         }
-        */
+    }
+}
+
+fn update_clock() {
+    unsafe {
         if !TIME.tick() {
             let ds3231::Date{second: sec,
                             minute: min,
@@ -56,6 +67,7 @@ fn update_clock() {
 }
 
 fn systick_handler() {
+    // digits_countup();
     update_clock();
 }
 
@@ -85,14 +97,6 @@ impl<'a> ShiftRegister<'a> {
         bsrr.write(|w| w.br2().reset());
         bsrr.write(|w| w.bs2().set());
     }
-}
-
-fn digits2bcds(digs: &[u8]) -> u32 {
-    let mut res: u32 = 0;
-    for d in digs.iter().rev() {
-        res = (res << 4) | (*d as u32);
-    }
-    res
 }
 
 impl Clock {
@@ -172,7 +176,7 @@ fn main() {
                                 month: 9,
                                 year: 17,
                                 am: false,
-                                am_enable: false});
+                                am_enabled: false});
         */
     }
 

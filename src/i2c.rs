@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 extern crate stm32f103xx;
-use stm32f103xx::RCC;
+use core::cmp::max;
 
 
 pub const EVENT_MASTER_STARTED: u32 = 0x00030001; /* BUSY, MSL and SB flag */
@@ -13,11 +13,6 @@ pub const EVENT_MASTER_BYTE_TRANSMITTED: u32 = 0x00070084;  /* TRA, BUSY, MSL, T
 const FLAGS_MASK: u32 = 0x00ffffff;
 const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
-const CCR_CCR_SET: u16 = 0x0FFF;
-const CCR_FS_SET: u16 = 0x8000;
-const CCR_DUTY_SET: u16 = 0x4000;
-const CR1_CLEAR_MASK: u16 = 0xFBF5;
-const I2C_ACK_ENABLE: u16 = 0x0400;
 
 pub struct I2C<'a> {
     i2c: &'a stm32f103xx::i2c1::RegisterBlock,
@@ -27,6 +22,11 @@ pub struct I2C<'a> {
 pub enum TransDir {
     TRANSMITTER,
     RECEIVER
+}
+
+pub enum DutyType {
+    DUTY0,
+    DUTY1
 }
 
 impl<'a> I2C<'a> {
@@ -66,31 +66,33 @@ impl<'a> I2C<'a> {
     }
 
     /// TODO: support for standard mode
-    pub fn init(&self, freq: u32, duty: bool) {
+    pub fn init(&self,
+                addr: u8,
+                scl_freq: u32,
+                duty_type: DutyType) {
         let i2c = &self.i2c;
         unsafe {
-            self.pe(true); /* PE = 1, enable I2C */
-            /* CR2 configuration */
             let pclk1 = self.get_pclk1();
-            let freq_range: u16 = (pclk1 / 1000000) as u16;
-            i2c.cr2.modify(|r, w| w.bits(r.bits()).freq().bits(freq_range as u8));
-            /* CCR configuration */
+            let freq_range: u16 = (pclk1 / 1_000_000) as u16;
             self.pe(false);
-            let mut res = match duty {
-                true => (pclk1 / (freq * (16 + 9))) as u16 | CCR_DUTY_SET,
-                false => (pclk1 / (freq * (2 + 1))) as u16
-            };
-            if (res & CCR_CCR_SET) == 0 {
-                res |= 0x0001;
-            }
-            /* TRISE configuration */
+            /* TRISE configuration (in Fm mode, max rise interval is 300) */
             i2c.trise.write(|w| w.bits(((freq_range * 300) / 1000 + 1) as u32));
-            i2c.ccr.write(|w| w.bits((res | CCR_FS_SET) as u32));
+            /* CCR configuration */
+            i2c.ccr.write(|w| match duty_type {
+                DutyType::DUTY0 => w.ccr().bits(max(pclk1 / (scl_freq * (2 + 1)), 0x1) as u16),
+                DutyType::DUTY1 => w.ccr().bits(max(pclk1 / (scl_freq * (16 + 9)), 0x1) as u16)
+                                          .duty().set_bit(),
+            }.f_s().set_bit());
             self.pe(true); /* PE = 1, enable I2C */
             /* CR1 configuration */
-            i2c.cr1.modify(|r, w| w.bits(((r.bits() as u16 & CR1_CLEAR_MASK) | I2C_ACK_ENABLE) as u32));
+            i2c.cr1.modify(|r, w| w.bits(r.bits())
+                                   .smbus().clear_bit()
+                                   .smbtype().clear_bit()
+                                   .ack().set_bit());
+            /* CR2 configuration */
+            i2c.cr2.modify(|r, w| w.bits(r.bits()).freq().bits(freq_range as u8));
             /* OAR1 configuration */
-            i2c.oar1.write(|w| w.addmode().clear_bit().add7().bits(0x01));
+            i2c.oar1.write(|w| w.addmode().clear_bit().add7().bits(addr));
             while i2c.sr2.read().busy().bit() {} /* wait until the bus is free */
         }
     }
