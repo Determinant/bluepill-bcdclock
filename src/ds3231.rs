@@ -1,13 +1,11 @@
 extern crate stm32f103xx;
-use ::i2c::{I2C, TransDir, DutyType};
+use i2c::{I2C, TransDir, DutyType};
 
 const DS3231_ADDR: u8 = 0b1101000;
 const DS3231_REG_SEC: u8 = 0x00;
 const DS3231_REG_CTL: u8 = 0x0e;
 
-pub struct DS3231<'a> {
-    i2c: I2C<'a>
-}
+pub struct DS3231<'a, 'b>(I2C<'a, 'b>);
 
 pub struct Date {
     pub second: u8,
@@ -21,10 +19,10 @@ pub struct Date {
     pub am_enabled: bool
 }
 
-impl<'a> DS3231<'a> {
+impl<'a, 'b> DS3231<'a, 'b> {
     pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock,
-               rcc_reg: &'a stm32f103xx::rcc::RegisterBlock) -> DS3231<'a> {
-        DS3231{i2c: I2C::new(i2c_reg, rcc_reg)}
+               rcc_reg: &'b stm32f103xx::rcc::RegisterBlock) -> DS3231<'a, 'b> {
+        DS3231(I2C::new(i2c_reg, rcc_reg))
     }
 
     fn bcd2dec(bcd: u8) -> u8 {
@@ -36,7 +34,7 @@ impl<'a> DS3231<'a> {
     }
 
     pub fn init(&self) {
-        let i2c = &self.i2c;
+        let &DS3231(ref i2c) = self;
         i2c.init(0x01, 400_000, DutyType::DUTY1);
         i2c.start(true, true);
         i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
@@ -48,7 +46,7 @@ impl<'a> DS3231<'a> {
 
     pub fn read_fulldate(&self) -> Date {
         let mut buf: [u8; 7] = [0; 7];
-        let i2c = &self.i2c;
+        let &DS3231(ref i2c) = self;
         i2c.conf_ack(true); /* enable ack */
         i2c.start(true, true); /* start condition (for writing reg addr) */
         i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
@@ -71,17 +69,17 @@ impl<'a> DS3231<'a> {
         let am = if am_enabled {(buf[2] >> 5) & 1 == 0} else {hour < 12};
         Date{second: DS3231::bcd2dec(buf[0]),
              minute: DS3231::bcd2dec(buf[1]),
-             hour: hour,
+             hour,
              day: DS3231::bcd2dec(buf[3]),
              date: DS3231::bcd2dec(buf[4]),
              month: DS3231::bcd2dec(buf[5]),
              year: DS3231::bcd2dec(buf[6]),
-             am: am,
-             am_enabled: am_enabled}
+             am,
+             am_enabled}
     }
 
     pub fn write_fulldate(&self, date: &Date) {
-        let i2c = &self.i2c;
+        let &DS3231(ref i2c) = self;
         let hour = if date.am_enabled {
             (1 << 6) | ((if date.am {0} else {1}) << 5) |
             ((date.hour / 10) << 4) | (date.hour % 10)

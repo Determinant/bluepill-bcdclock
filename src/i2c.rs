@@ -14,9 +14,9 @@ const FLAGS_MASK: u32 = 0x00ffffff;
 const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
 
-pub struct I2C<'a> {
+pub struct I2C<'a, 'b> {
     i2c: &'a stm32f103xx::i2c1::RegisterBlock,
-    rcc: &'a stm32f103xx::rcc::RegisterBlock,
+    rcc: &'b stm32f103xx::rcc::RegisterBlock,
 }
 
 pub enum TransDir {
@@ -29,10 +29,10 @@ pub enum DutyType {
     DUTY1
 }
 
-impl<'a> I2C<'a> {
-    pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock,
-               rcc_reg: &'a stm32f103xx::rcc::RegisterBlock) -> I2C<'a> {
-        I2C{i2c: i2c_reg, rcc: rcc_reg}
+impl<'a, 'b> I2C<'a, 'b> {
+    pub fn new(i2c: &'a stm32f103xx::i2c1::RegisterBlock,
+               rcc: &'b stm32f103xx::rcc::RegisterBlock) -> I2C<'a, 'b> {
+        I2C{i2c, rcc}
     }
 
     fn get_pclk1(&self) -> u32 {

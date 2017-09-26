@@ -53,9 +53,7 @@ fn update_clock() {
                             minute: min,
                             hour: hr, ..} = RTC.as_mut().unwrap()
                                                 .read_fulldate();
-            TIME = Clock{sec: sec,
-                        min: min,
-                        hr: hr,
+            TIME = Clock{sec, min, hr,
                         reset: RESET_PERIOD};
         }
 
@@ -74,9 +72,9 @@ fn systick_handler() {
 exception!(SYS_TICK, systick_handler);
 
 impl<'a> ShiftRegister<'a> {
-    fn new(g: &'a stm32f103xx::gpioa::RegisterBlock,
+    fn new(gpioa: &'a stm32f103xx::gpioa::RegisterBlock,
            width: u8) -> ShiftRegister<'a> {
-        let this = ShiftRegister{gpioa: g, width: width};
+        let this = ShiftRegister{gpioa, width};
         this
     }
 
