@@ -14,7 +14,7 @@ const FLAGS_MASK: u32 = 0x00ffffff;
 const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
 
-pub struct I2C<'a, 'b> {
+pub struct I2C<'a, 'b: 'a> {
     i2c: &'a stm32f103xx::i2c1::RegisterBlock,
     rcc: &'b stm32f103xx::rcc::RegisterBlock,
 }

@@ -6,6 +6,7 @@ use stm32f103xx::{GPIOA, GPIOB, RCC, SYST, I2C1};
 use cortex_m::peripheral::SystClkSource;
 mod i2c;
 mod ds3231;
+mod at24c;
 
 struct ShiftRegister<'a> {
     gpioa: &'a stm32f103xx::gpioa::RegisterBlock,
@@ -21,7 +22,9 @@ struct Clock {
 
 const RESET_PERIOD: u8 = 10;
 static mut SR: Option<ShiftRegister> = None;
+static mut I2C: Option<i2c::I2C> = None;
 static mut RTC: Option<ds3231::DS3231> = None;
+static mut ROM: Option<at24c::AT24C> = None;
 static mut DIGITS: [u8; 6] = [0; 6];
 static mut TIME: Clock = Clock{sec: 0, min: 0, hr: 0, reset: 0};
 
@@ -159,12 +162,17 @@ fn main() {
     rcc.apb1rstr.modify(|_, w| w.i2c1rst().clear_bit());
 
     unsafe {
-        RTC = Some(ds3231::DS3231::new(i2c, rcc));
+        I2C = Some(i2c::I2C::new(i2c, rcc));
+        let i2c = I2C.as_mut().unwrap();
+        RTC = Some(ds3231::DS3231::new(i2c));
+        ROM = Some(at24c::AT24C::new(i2c));
         SR = Some(ShiftRegister::new(gpioa, 24));
+
+        i2c.init(0x01, 400_000, i2c::DutyType::DUTY1);
         SR.as_mut().unwrap().output_bits(0);
+
         let rtc = RTC.as_mut().unwrap();
         /* initialize the ds3231 */
-        rtc.init();
         /*
         rtc.write_fulldate(&ds3231::Date{second: 30,
                                 minute: 48,
@@ -175,6 +183,13 @@ fn main() {
                                 year: 17,
                                 am: false,
                                 am_enabled: false});
+        */
+        /*
+        let rom = ROM.as_mut().unwrap();
+        let mut buf: [u8; 16] = [0; 16];
+        rom.read(0, 16, &mut buf);
+        let mut buf2: [u8; 4] = [0, 1, 2, 3];
+        rom.page_write(0, 4, &buf2);
         */
     }
 

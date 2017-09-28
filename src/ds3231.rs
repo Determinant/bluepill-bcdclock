@@ -4,8 +4,9 @@ use i2c::{I2C, TransDir, DutyType};
 const DS3231_ADDR: u8 = 0b1101000;
 const DS3231_REG_SEC: u8 = 0x00;
 const DS3231_REG_CTL: u8 = 0x0e;
+const DS3231_REG_TEMP: u8 = 0x11;
 
-pub struct DS3231<'a, 'b>(I2C<'a, 'b>);
+pub struct DS3231<'a, 'b: 'a>(&'a I2C<'a, 'b>);
 
 pub struct Date {
     pub second: u8,
@@ -19,10 +20,14 @@ pub struct Date {
     pub am_enabled: bool
 }
 
+pub struct Temp {
+    pub cels: i8,
+    pub quarter: u8
+}
+
 impl<'a, 'b> DS3231<'a, 'b> {
-    pub fn new(i2c_reg: &'a stm32f103xx::i2c1::RegisterBlock,
-               rcc_reg: &'b stm32f103xx::rcc::RegisterBlock) -> DS3231<'a, 'b> {
-        DS3231(I2C::new(i2c_reg, rcc_reg))
+    pub fn new(i2c: &'a I2C<'a, 'b>) -> DS3231<'a, 'b> {
+        DS3231(i2c)
     }
 
     fn bcd2dec(bcd: u8) -> u8 {
@@ -33,33 +38,38 @@ impl<'a, 'b> DS3231<'a, 'b> {
         ((dec / 10) << 4) | (dec % 10)
     }
 
-    pub fn init(&self) {
+    fn read_register(&self, start: u8, size: usize, buf: &mut [u8]){
         let &DS3231(ref i2c) = self;
-        i2c.init(0x01, 400_000, DutyType::DUTY1);
-        i2c.start(true, true);
+        i2c.conf_ack(true); /* enable ack */
+        i2c.start(true, true); /* start condition (for writing reg addr) */
         i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
-        i2c.send(DS3231_REG_CTL, true);
-        i2c.send(0x00, true);
-        i2c.send(0x00, true);
+        i2c.send(start, true);
+        /* restart condition (for reading val from the reg addr) */
+        i2c.start(true, true);
+        i2c.send_addr(DS3231_ADDR, TransDir::RECEIVER, true);
+        for i in 0..(size - 1) {
+            buf[i] = i2c.recv(true);
+        }
+        i2c.conf_ack(false); /* disable ack (send nack) */
+        buf[size - 1] = i2c.recv(true);
+        i2c.stop(true);
+    }
+
+    fn write_register(&self, start: u8, size: usize, buf: &[u8]) {
+        let &DS3231(ref i2c) = self;
+        i2c.conf_ack(true);
+        i2c.start(true, true); /* start condition for writing */
+        i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
+        i2c.send(start, true);
+        for i in 0..size {
+            i2c.send(buf[i], true);
+        }
         i2c.stop(true);
     }
 
     pub fn read_fulldate(&self) -> Date {
         let mut buf: [u8; 7] = [0; 7];
-        let &DS3231(ref i2c) = self;
-        i2c.conf_ack(true); /* enable ack */
-        i2c.start(true, true); /* start condition (for writing reg addr) */
-        i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
-        i2c.send(DS3231_REG_SEC, true);
-        /* restart condition (for reading val from the reg addr) */
-        i2c.start(true, true);
-        i2c.send_addr(DS3231_ADDR, TransDir::RECEIVER, true);
-        for i in 0..6 {
-            buf[i] = i2c.recv(true);
-        }
-        i2c.conf_ack(false); /* disable ack (send nack) */
-        buf[6] = i2c.recv(true);
-        i2c.stop(true);
+        self.read_register(DS3231_REG_SEC, 7, &mut buf);
         let am_enabled = (buf[2] >> 6) & 1 == 1;
         let hour = if am_enabled {
             (buf[2] & 0x0f) + ((buf[2] >> 4) & 1) * 10
@@ -79,7 +89,6 @@ impl<'a, 'b> DS3231<'a, 'b> {
     }
 
     pub fn write_fulldate(&self, date: &Date) {
-        let &DS3231(ref i2c) = self;
         let hour = if date.am_enabled {
             (1 << 6) | ((if date.am {0} else {1}) << 5) |
             ((date.hour / 10) << 4) | (date.hour % 10)
@@ -93,13 +102,17 @@ impl<'a, 'b> DS3231<'a, 'b> {
                             DS3231::dec2bcd(date.date),
                             DS3231::dec2bcd(date.month),
                             DS3231::dec2bcd(date.year)];
-        i2c.conf_ack(true);
-        i2c.start(true, true); /* start condition for writing */
-        i2c.send_addr(DS3231_ADDR, TransDir::TRANSMITTER, true);
-        i2c.send(DS3231_REG_SEC, true);
-        for i in 0..7 {
-            i2c.send(buf[i], true);
-        }
-        i2c.stop(true);
+        self.write_register(DS3231_REG_SEC, 7, &buf);
+    }
+
+    pub fn write_control(&self) {
+        let buf: [u8; 2] = [0; 2];
+        self.write_register(DS3231_REG_CTL, 2, &buf);
+    }
+
+    pub fn read_temperature(&self) -> Temp {
+        let mut buf: [u8; 2] = [0; 2];
+        self.read_register(DS3231_REG_TEMP, 2, &mut buf);
+        Temp{cels: buf[0] as i8, quarter: buf[1] >> 6}
     }
 }
