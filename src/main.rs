@@ -51,6 +51,7 @@ fn digits_countup() {
 
 fn update_clock() {
     unsafe {
+        if RTC.is_none() {return}
         if !TIME.tick() {
             let ds3231::Date{second: sec,
                             minute: min,
@@ -164,14 +165,14 @@ fn main() {
     unsafe {
         I2C = Some(i2c::I2C::new(i2c, rcc));
         let i2c = I2C.as_mut().unwrap();
-        RTC = Some(ds3231::DS3231::new(i2c));
+        let rtc = ds3231::DS3231::new(i2c);
         ROM = Some(at24c::AT24C::new(i2c));
         SR = Some(ShiftRegister::new(gpioa, 24));
 
-        i2c.init(0x01, 400_000, i2c::DutyType::DUTY1);
+        i2c.init(0x01, 400_000, i2c::DutyType::DUTY1, true);
+        //i2c.init(0x01, 100_000, i2c::DutyType::DUTY1, false);
         SR.as_mut().unwrap().output_bits(0);
 
-        let rtc = RTC.as_mut().unwrap();
         /* initialize the ds3231 */
         /*
         rtc.write_fulldate(&ds3231::Date{second: 30,
@@ -186,11 +187,12 @@ fn main() {
         */
         /*
         let rom = ROM.as_mut().unwrap();
-        let mut buf: [u8; 16] = [0; 16];
-        rom.read(0, 16, &mut buf);
-        let mut buf2: [u8; 4] = [0, 1, 2, 3];
-        rom.page_write(0, 4, &buf2);
+        let mut buf: [u8; 64] = [23; 64];
+        rom.write(23, 64, &buf);
+        let mut buf2: [u8; 80] = [0; 80];
+        rom.read(20, 80, &mut buf2);
         */
+        RTC = Some(rtc);
     }
 
     update_clock();

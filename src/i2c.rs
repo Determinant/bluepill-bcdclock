@@ -30,6 +30,7 @@ pub enum DutyType {
 }
 
 impl<'a, 'b> I2C<'a, 'b> {
+    #[inline(always)]
     pub fn new(i2c: &'a stm32f103xx::i2c1::RegisterBlock,
                rcc: &'b stm32f103xx::rcc::RegisterBlock) -> I2C<'a, 'b> {
         I2C{i2c, rcc}
@@ -69,20 +70,28 @@ impl<'a, 'b> I2C<'a, 'b> {
     pub fn init(&self,
                 addr: u8,
                 scl_freq: u32,
-                duty_type: DutyType) {
+                duty_type: DutyType,
+                fast_mode: bool) {
         let i2c = &self.i2c;
         unsafe {
             let pclk1 = self.get_pclk1();
             let freq_range: u16 = (pclk1 / 1_000_000) as u16;
             self.pe(false);
             /* TRISE configuration (in Fm mode, max rise interval is 300) */
-            i2c.trise.write(|w| w.bits(((freq_range * 300) / 1000 + 1) as u32));
+            i2c.trise.write(|w| w.bits(if fast_mode {(freq_range * 300) / 1000 + 1}
+                                       else {freq_range + 1} as u32));
             /* CCR configuration */
-            i2c.ccr.write(|w| match duty_type {
-                DutyType::DUTY0 => w.ccr().bits(max(pclk1 / (scl_freq * (2 + 1)), 0x1) as u16),
-                DutyType::DUTY1 => w.ccr().bits(max(pclk1 / (scl_freq * (16 + 9)), 0x1) as u16)
-                                          .duty().set_bit(),
-            }.f_s().set_bit());
+            i2c.ccr.write(|w|
+                if fast_mode {
+                    match duty_type {
+                        DutyType::DUTY0 => w.ccr().bits(max(pclk1 / (scl_freq * (2 + 1)), 0x1) as u16),
+                        DutyType::DUTY1 => w.ccr().bits(max(pclk1 / (scl_freq * (16 + 9)), 0x1) as u16)
+                                            .duty().set_bit(),
+                    }.f_s().set_bit()
+                } else {
+                    w.ccr().bits(max(pclk1 / (scl_freq * (1 + 1)), 0x4) as u16)
+                     .f_s().clear_bit()
+                });
             self.pe(true); /* PE = 1, enable I2C */
             /* CR1 configuration */
             i2c.cr1.modify(|r, w| w.bits(r.bits())
@@ -107,6 +116,10 @@ impl<'a, 'b> I2C<'a, 'b> {
         }
     }
 
+    pub fn is_ack_fail(&self) -> bool {
+        self.i2c.sr1.read().af().bit_is_set()
+    }
+
     pub fn start(&self, enable: bool, synced: bool) {
         let i2c = &self.i2c;
         unsafe {
@@ -116,7 +129,10 @@ impl<'a, 'b> I2C<'a, 'b> {
             }
         }
         if synced {
-            while !self.check_event(EVENT_MASTER_STARTED) {}
+            match enable {
+                true => while !self.check_event(EVENT_MASTER_STARTED) {},
+                false => while self.check_event(EVENT_MASTER_STARTED) {}
+            }
         }
     }
 
@@ -140,22 +156,32 @@ impl<'a, 'b> I2C<'a, 'b> {
         }
     }
 
-    pub fn send_addr(&self, addr: u8, d: TransDir, synced: bool) {
+    pub fn send_addr(&self, addr: u8, d: TransDir, synced: bool) -> bool {
         let addr = (addr << 1) | match d {
             TransDir::TRANSMITTER => 0,
             TransDir::RECEIVER => 1
         };
         unsafe {
+            self.i2c.sr1.write(|w| w.af().clear_bit());
             self.i2c.dr.write(|w| w.dr().bits(addr));
         }
         if synced {
             match d {
                 TransDir::TRANSMITTER =>
-                    while !self.check_event(EVENT_MASTER_TRANSMITTER_MODE_SELECTED) {},
+                    while !self.check_event(EVENT_MASTER_TRANSMITTER_MODE_SELECTED) {
+                        if self.is_ack_fail() {
+                            return false
+                        }
+                    },
                 TransDir::RECEIVER =>
-                    while !self.check_event(EVENT_MASTER_RECEIVER_MODE_SELECTED) {}
+                    while !self.check_event(EVENT_MASTER_RECEIVER_MODE_SELECTED) {
+                        if self.is_ack_fail() {
+                            return false
+                        }
+                    }
             }
         }
+        true
     }
 
     pub fn send(&self, data: u8, synced: bool) {
