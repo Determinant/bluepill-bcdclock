@@ -1,4 +1,3 @@
-extern crate stm32f103xx;
 use i2c::{I2C, TransDir, DutyType};
 
 const DS3231_ADDR: u8 = 0b1101000;
@@ -6,7 +5,7 @@ const DS3231_REG_SEC: u8 = 0x00;
 const DS3231_REG_CTL: u8 = 0x0e;
 const DS3231_REG_TEMP: u8 = 0x11;
 
-pub struct DS3231<'a, 'b: 'a>(&'a I2C<'a, 'b>);
+pub struct DS3231<'a>(&'a I2C<'a>);
 
 pub struct Date {
     pub second: u8,
@@ -25,8 +24,8 @@ pub struct Temp {
     pub quarter: u8
 }
 
-impl<'a, 'b> DS3231<'a, 'b> {
-    pub fn new(i2c: &'a I2C<'a, 'b>) -> DS3231<'a, 'b> {
+impl<'a> DS3231<'a> {
+    pub fn new(i2c: &'a I2C<'a>) -> DS3231<'a> {
         DS3231(i2c)
     }
 

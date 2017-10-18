@@ -1,12 +1,11 @@
-extern crate stm32f103xx;
-use i2c::{I2C, TransDir, DutyType};
+use i2c::{I2C, TransDir};
 
 const AT24C_ADDR: u8 = 0b1010111; /* suppose A0, A1, A2 = 1 */
 
-pub struct AT24C<'a, 'b: 'a>(&'a I2C<'a, 'b>);
+pub struct AT24C<'a>(&'a I2C<'a>);
 
-impl<'a, 'b> AT24C<'a, 'b> {
-    pub fn new(i2c: &'a I2C<'a, 'b>) -> AT24C<'a, 'b> {
+impl<'a> AT24C<'a> {
+    pub fn new(i2c: &'a I2C<'a>) -> AT24C<'a> {
         AT24C(i2c)
     }
 

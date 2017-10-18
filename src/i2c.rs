@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 extern crate stm32f103xx;
 use core::cmp::max;
+use stm32f103xx::{i2c1, rcc, RCC};
 
 
 pub const EVENT_MASTER_STARTED: u32 = 0x00030001; /* BUSY, MSL and SB flag */
@@ -14,10 +15,7 @@ const FLAGS_MASK: u32 = 0x00ffffff;
 const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
 
-pub struct I2C<'a, 'b: 'a> {
-    i2c: &'a stm32f103xx::i2c1::RegisterBlock,
-    rcc: &'b stm32f103xx::rcc::RegisterBlock,
-}
+pub struct I2C<'a> (&'a i2c1::RegisterBlock);
 
 pub enum TransDir {
     TRANSMITTER,
@@ -29,16 +27,15 @@ pub enum DutyType {
     DUTY1
 }
 
-impl<'a, 'b> I2C<'a, 'b> {
+impl<'a> I2C<'a> {
     #[inline(always)]
-    pub fn new(i2c: &'a stm32f103xx::i2c1::RegisterBlock,
-               rcc: &'b stm32f103xx::rcc::RegisterBlock) -> I2C<'a, 'b> {
-        I2C{i2c, rcc}
+    pub fn new(i2c: &'a i2c1::RegisterBlock) -> I2C<'a> {
+        I2C(i2c)
     }
 
-    fn get_pclk1(&self) -> u32 {
+    fn get_pclk1(rcc: &RCC) -> u32 {
         use stm32f103xx::rcc::cfgr::{SWSR, PLLSRCR, PLLXTPRER};
-        let cfgr = self.rcc.cfgr.read();
+        let cfgr = rcc.cfgr.read();
         let sysclk_freq = match cfgr.sws() {
             SWSR::HSI => HSI_VALUE,
             SWSR::HSE => HSE_VALUE,
@@ -68,13 +65,14 @@ impl<'a, 'b> I2C<'a, 'b> {
 
     /// TODO: support for standard mode
     pub fn init(&self,
+                rcc: &RCC,
                 addr: u8,
                 scl_freq: u32,
                 duty_type: DutyType,
                 fast_mode: bool) {
-        let i2c = &self.i2c;
+        let &I2C(ref i2c) = self;
         unsafe {
-            let pclk1 = self.get_pclk1();
+            let pclk1 = I2C::get_pclk1(rcc);
             let freq_range: u16 = (pclk1 / 1_000_000) as u16;
             self.pe(false);
             /* TRISE configuration (in Fm mode, max rise interval is 300) */
@@ -107,7 +105,7 @@ impl<'a, 'b> I2C<'a, 'b> {
     }
 
     pub fn pe(&self, enable: bool) {
-        let i2c = &self.i2c;
+        let &I2C(ref i2c) = self;
         unsafe {
             match enable {
                 true => i2c.cr1.modify(|r, w| w.bits(r.bits()).pe().set_bit()),
@@ -117,11 +115,11 @@ impl<'a, 'b> I2C<'a, 'b> {
     }
 
     pub fn is_ack_fail(&self) -> bool {
-        self.i2c.sr1.read().af().bit_is_set()
+        self.0.sr1.read().af().bit_is_set()
     }
 
     pub fn start(&self, enable: bool, synced: bool) {
-        let i2c = &self.i2c;
+        let &I2C(ref i2c) = self;
         unsafe {
             match enable {
                 true => i2c.cr1.modify(|r, w| w.bits(r.bits()).start().set_bit()),
@@ -137,7 +135,7 @@ impl<'a, 'b> I2C<'a, 'b> {
     }
 
     pub fn stop(&self, enable: bool) {
-        let i2c = &self.i2c;
+        let &I2C(ref i2c) = self;
         unsafe {
             match enable {
                 true => i2c.cr1.modify(|r, w| w.bits(r.bits()).stop().set_bit()),
@@ -147,7 +145,7 @@ impl<'a, 'b> I2C<'a, 'b> {
     }
 
     pub fn conf_ack(&self, enable: bool) {
-        let i2c = &self.i2c;
+        let &I2C(ref i2c) = self;
         unsafe {
             match enable {
                 true => i2c.cr1.modify(|r, w| w.bits(r.bits()).ack().set_bit()),
@@ -162,8 +160,8 @@ impl<'a, 'b> I2C<'a, 'b> {
             TransDir::RECEIVER => 1
         };
         unsafe {
-            self.i2c.sr1.write(|w| w.af().clear_bit());
-            self.i2c.dr.write(|w| w.dr().bits(addr));
+            self.0.sr1.write(|w| w.af().clear_bit());
+            self.0.dr.write(|w| w.dr().bits(addr));
         }
         if synced {
             match d {
@@ -186,7 +184,7 @@ impl<'a, 'b> I2C<'a, 'b> {
 
     pub fn send(&self, data: u8, synced: bool) {
         unsafe {
-            self.i2c.dr.write(|w| w.dr().bits(data));
+            self.0.dr.write(|w| w.dr().bits(data));
         }
         if synced {
             while !self.check_event(EVENT_MASTER_BYTE_TRANSMITTED) {}
@@ -197,12 +195,12 @@ impl<'a, 'b> I2C<'a, 'b> {
         if synced {
             while !self.check_event(EVENT_MASTER_BYTE_RECEIVED) {}
         }
-        self.i2c.dr.read().dr().bits()
+        self.0.dr.read().dr().bits()
     }
 
     pub fn check_event(&self, ev_mask: u32) -> bool {
-        let flags = self.i2c.sr1.read().bits() & 0xffff |
-                    ((self.i2c.sr2.read().bits() & 0xffff) << 16) & FLAGS_MASK;
+        let flags = self.0.sr1.read().bits() & 0xffff |
+                    ((self.0.sr2.read().bits() & 0xffff) << 16) & FLAGS_MASK;
         (flags & ev_mask) == ev_mask
     }
 }
