@@ -5,10 +5,6 @@ const AT24C_ADDR: u8 = 0b1010111; /* suppose A0, A1, A2 = 1 */
 pub struct AT24C<'a>(&'a I2C<'a>);
 
 impl<'a> AT24C<'a> {
-    pub fn new(i2c: &'a I2C<'a>) -> AT24C<'a> {
-        AT24C(i2c)
-    }
-
     pub fn read(&self, start: u16, size: usize, buf: &mut [u8]) {
         let &AT24C(ref i2c) = self;
         i2c.conf_ack(true); /* enable ack */

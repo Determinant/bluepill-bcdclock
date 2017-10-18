@@ -13,6 +13,8 @@ mod i2c;
 mod ds3231;
 mod at24c;
 
+const SYNC_PERIOD: u8 = 10;
+
 struct ShiftRegister<'a> {
     gpioa: &'a gpioa::RegisterBlock,
     width: u8,
@@ -25,14 +27,28 @@ struct Clock {
     reset: u8
 }
 
-const RESET_PERIOD: u8 = 10;
-static mut SR: Option<ShiftRegister> = None;
-static mut I2C: Option<i2c::I2C> = None;
-static mut RTC: Option<ds3231::DS3231> = None;
-static mut ROM: Option<at24c::AT24C> = None;
-static mut DIGITS: [u8; 6] = [0; 6];
-static mut TIME: Clock = Clock{sec: 0, min: 0, hr: 0, reset: 0};
-static mut PERIP: Option<Peripherals> = None;
+struct GlobalState {
+    disp: Option<ShiftRegister<'static>>,
+    i2c: Option<i2c::I2C<'static>>,
+    i2c_inited: bool,
+    buff: [u8; 6],
+    time: Clock,
+    perip: Option<Peripherals<'static>>,
+    bs: bool
+}
+
+static mut GS: GlobalState =
+    GlobalState{disp: None,
+                i2c: None,
+                i2c_inited: false,
+                buff: [0; 6],
+                time: Clock{sec: 0, min: 0, hr: 0, reset: 0},
+                perip: None,
+                bs: false};
+
+fn get_gs() -> &'static mut GlobalState {
+    unsafe {&mut GS}
+}
 
 fn digits2bcds(digs: &[u8]) -> u32 {
     let mut res: u32 = 0;
@@ -42,53 +58,53 @@ fn digits2bcds(digs: &[u8]) -> u32 {
     res
 }
 
-fn digits_countup() {
-    unsafe {
-        SR.as_ref().unwrap().output_bits(digits2bcds(&DIGITS[..]));
-        let mut i = 0;
-        let mut carry = 1;
-        while carry > 0 && i < DIGITS.len() {
-            DIGITS[i] += carry;
-            carry = if DIGITS[i] > 9 {DIGITS[i] = 0; 1} else {0};
-            i += 1;
-        }
-    }
+fn display() {
+    let gs = get_gs();
+    gs.disp.as_ref().unwrap().output_bits(digits2bcds(&gs.buff[..]));
 }
 
-fn refresh_clock() {
-    unsafe {
-        SR.as_ref().unwrap().output_bits(digits2bcds(&DIGITS[..]));
+fn digits_countup() {
+    let gs = get_gs();
+    let mut digits = gs.buff;
+    gs.disp.as_ref().unwrap().output_bits(digits2bcds(&digits[..]));
+    let mut i = 0;
+    let mut carry = 1;
+    while carry > 0 && i < digits.len() {
+        digits[i] += carry;
+        carry = if digits[i] > 9 {digits[i] = 0; 1} else {0};
+        i += 1;
     }
 }
 
 fn render_clock() {
-    unsafe {
-        if bs {
-            DIGITS[1] = TIME.sec / 10; DIGITS[0] = TIME.sec - DIGITS[1] * 10;
-            DIGITS[3] = TIME.min / 10; DIGITS[2] = TIME.min - DIGITS[3] * 10;
-            DIGITS[5] = TIME.hr / 10; DIGITS[4] = TIME.hr - DIGITS[5] * 10;
-        } else {
-            for i in &mut DIGITS {
-                *i = 0xf;
-            }
+    let gs = get_gs();
+    let mut digits = gs.buff;
+    let time = &gs.time;
+    if gs.bs {
+        digits[1] = time.sec / 10; digits[0] = time.sec - digits[1] * 10;
+        digits[3] = time.min / 10; digits[2] = time.min - digits[3] * 10;
+        digits[5] = time.hr / 10; digits[4] = time.hr - digits[5] * 10;
+    } else {
+        for i in &mut digits {
+            *i = 0xf;
         }
     }
 }
 
 fn update_clock() {
-    unsafe {
-        if RTC.is_none() {return}
-        if !TIME.tick() {
-            let ds3231::Date{second: sec,
-                            minute: min,
-                            hour: hr, ..} = RTC.as_ref().unwrap()
-                                                .read_fulldate();
-            TIME = Clock{sec, min, hr,
-                        reset: RESET_PERIOD};
-        }
+    let gs = get_gs();
+    let p = gs.perip.as_ref().unwrap();
+    let rtc = ds3231::DS3231(gs.i2c.as_ref().unwrap());
+    if !gs.i2c_inited {return}
+    if !gs.time.tick() {
+        let ds3231::Date{second: sec,
+                        minute: min,
+                        hour: hr, ..} = rtc.read_fulldate();
+        gs.time = Clock{sec, min, hr,
+                        reset: SYNC_PERIOD};
     }
     render_clock();
-    refresh_clock();
+    display();
 }
 
 fn systick_handler() {
@@ -96,21 +112,18 @@ fn systick_handler() {
     update_clock();
 }
 
-static mut bs: bool = false;
-
 fn exti3_handler() {
-    let p = unsafe {PERIP.as_ref().unwrap()};
+    let gs = get_gs();
+    let p = gs.perip.as_ref().unwrap();
     p.EXTI.pr.write(|w| w.pr3().set_bit());
     let x = p.GPIOA.idr.read().idr3().bit();
-    unsafe {
-        if !x && !bs {
-            bs = true;
-        } else if x && bs {
-            bs = false;
-        }
+    if !x && !gs.bs {
+        gs.bs = true;
+    } else if x && gs.bs {
+        gs.bs = false;
     }
     render_clock();
-    refresh_clock();
+    display();
 }
 
 exception!(SYS_TICK, systick_handler);
@@ -168,9 +181,10 @@ impl Clock {
 }
 
 fn init() {
-    let p = unsafe {
-        PERIP = Some(Peripherals::all());
-        PERIP.as_ref().unwrap()
+    let gs = get_gs();
+    let p = {
+        gs.perip = Some(unsafe {Peripherals::all()});
+        gs.perip.as_ref().unwrap()
     };
 
     p.SYST.set_clock_source(SystClkSource::Core);
@@ -211,21 +225,17 @@ fn init() {
     p.EXTI.ftsr.write(|w| w.tr3().set_bit());
 
 
-    unsafe {
-        I2C = Some(i2c::I2C::new(p.I2C1));
-        let i2c = I2C.as_ref().unwrap();
-        RTC = Some(ds3231::DS3231::new(i2c));
-        ROM = Some(at24c::AT24C::new(i2c));
-        SR = Some(ShiftRegister::new(p.GPIOA, 24));
-
-        i2c.init(p.RCC, 0x01, 400_000, i2c::DutyType::DUTY1, true);
-        //i2c.init(0x01, 100_000, i2c::DutyType::DUTY1, false);
-        SR.as_ref().unwrap().output_bits(0);
-    }
+    gs.i2c = Some(i2c::I2C(p.I2C1));
+    gs.disp = Some(ShiftRegister::new(p.GPIOA, 24));
+    gs.i2c.as_ref().unwrap().init(p.RCC, 0x01, 400_000, i2c::DutyType::DUTY1, true);
+    //i2c.init(0x01, 100_000, i2c::DutyType::DUTY1, false);
+    gs.disp.as_ref().unwrap().output_bits(0);
 }
 
 fn set_clock() {
-    let rtc = unsafe {RTC.as_ref().unwrap()};
+    let gs = get_gs();
+    let p = gs.perip.as_ref().unwrap();
+    let rtc = ds3231::DS3231(gs.i2c.as_ref().unwrap());
     rtc.write_fulldate(&ds3231::Date{second: 30,
                             minute: 23,
                             hour: 18,

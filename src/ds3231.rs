@@ -5,7 +5,7 @@ const DS3231_REG_SEC: u8 = 0x00;
 const DS3231_REG_CTL: u8 = 0x0e;
 const DS3231_REG_TEMP: u8 = 0x11;
 
-pub struct DS3231<'a>(&'a I2C<'a>);
+pub struct DS3231<'a>(pub &'a I2C<'a>);
 
 pub struct Date {
     pub second: u8,
@@ -25,10 +25,6 @@ pub struct Temp {
 }
 
 impl<'a> DS3231<'a> {
-    pub fn new(i2c: &'a I2C<'a>) -> DS3231<'a> {
-        DS3231(i2c)
-    }
-
     fn bcd2dec(bcd: u8) -> u8 {
         (bcd >> 4) * 10 + (bcd & 0x0f)
     }

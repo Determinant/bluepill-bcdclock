@@ -15,7 +15,7 @@ const FLAGS_MASK: u32 = 0x00ffffff;
 const HSI_VALUE: u32 = 8000000;
 const HSE_VALUE: u32 = 8000000;
 
-pub struct I2C<'a> (&'a i2c1::RegisterBlock);
+pub struct I2C<'a> (pub &'a i2c1::RegisterBlock);
 
 pub enum TransDir {
     TRANSMITTER,
@@ -29,10 +29,6 @@ pub enum DutyType {
 
 impl<'a> I2C<'a> {
     #[inline(always)]
-    pub fn new(i2c: &'a i2c1::RegisterBlock) -> I2C<'a> {
-        I2C(i2c)
-    }
-
     fn get_pclk1(rcc: &RCC) -> u32 {
         use stm32f103xx::rcc::cfgr::{SWSR, PLLSRCR, PLLXTPRER};
         let cfgr = rcc.cfgr.read();
