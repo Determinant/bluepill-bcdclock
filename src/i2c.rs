@@ -3,7 +3,6 @@ extern crate stm32f103xx;
 use core::cmp::max;
 use stm32f103xx::{i2c1, rcc, RCC};
 
-
 pub const EVENT_MASTER_STARTED: u32 = 0x00030001; /* BUSY, MSL and SB flag */
 pub const EVENT_MASTER_TRANSMITTER_MODE_SELECTED: u32 = 0x00070082;  /* BUSY, MSL, ADDR, TXE and TRA flags */
 pub const EVENT_MASTER_RECEIVER_MODE_SELECTED: u32 = 0x00030002;  /* BUSY, MSL and ADDR flags */

@@ -12,6 +12,7 @@ mod mutex;
 mod i2c;
 mod ds3231;
 mod at24c;
+mod tim;
 
 const SYNC_PERIOD: u8 = 10;
 
@@ -30,6 +31,7 @@ struct Clock {
 struct GlobalState {
     disp: Option<ShiftRegister<'static>>,
     i2c: Option<i2c::I2C<'static>>,
+    tim: Option<tim::Timer<'static>>,
     i2c_inited: bool,
     buff: [u8; 6],
     time: Clock,
@@ -40,6 +42,7 @@ struct GlobalState {
 static mut GS: GlobalState =
     GlobalState{disp: None,
                 i2c: None,
+                tim: None,
                 i2c_inited: false,
                 buff: [0; 6],
                 time: Clock{sec: 0, min: 0, hr: 0, reset: 0},
@@ -65,7 +68,7 @@ fn display() {
 
 fn digits_countup() {
     let gs = get_gs();
-    let mut digits = gs.buff;
+    let mut digits = &mut gs.buff;
     gs.disp.as_ref().unwrap().output_bits(digits2bcds(&digits[..]));
     let mut i = 0;
     let mut carry = 1;
@@ -78,14 +81,14 @@ fn digits_countup() {
 
 fn render_clock() {
     let gs = get_gs();
-    let mut digits = gs.buff;
+    let mut digits = &mut gs.buff;
     let time = &gs.time;
     if gs.bs {
         digits[1] = time.sec / 10; digits[0] = time.sec - digits[1] * 10;
         digits[3] = time.min / 10; digits[2] = time.min - digits[3] * 10;
         digits[5] = time.hr / 10; digits[4] = time.hr - digits[5] * 10;
     } else {
-        for i in &mut digits {
+        for i in digits {
             *i = 0xf;
         }
     }
@@ -126,8 +129,18 @@ fn exti3_handler() {
     display();
 }
 
+fn tim2_handler() {
+    let gs = get_gs();
+    let p = gs.perip.as_ref().unwrap();
+    p.TIM2.sr.modify(|_, w| w.uif().clear());
+    gs.bs = !gs.bs;
+    render_clock();
+    display();
+}
+
 exception!(SYS_TICK, systick_handler);
 interrupt!(EXTI3, exti3_handler);
+interrupt!(TIM2, tim2_handler);
 
 impl<'a> ShiftRegister<'a> {
     fn new(gpioa: &'a gpioa::RegisterBlock,
@@ -196,6 +209,7 @@ fn init() {
     p.RCC.apb2enr.modify(|_, w| w.iopaen().enabled()
                                 .iopben().enabled()
                                 .afioen().enabled());
+    p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled());
 
     /* GPIO */
     /* enable PA0-2 for manipulating shift register */
@@ -220,6 +234,7 @@ fn init() {
     /* NVIC & EXTI */
     p.AFIO.exticr1.write(|w| unsafe { w.exti3().bits(0b0000) });
     p.NVIC.enable(Interrupt::EXTI3);
+    p.NVIC.enable(Interrupt::TIM2);
     p.EXTI.imr.write(|w| w.mr3().set_bit());
     p.EXTI.rtsr.write(|w| w.tr3().set_bit());
     p.EXTI.ftsr.write(|w| w.tr3().set_bit());
@@ -227,9 +242,13 @@ fn init() {
 
     gs.i2c = Some(i2c::I2C(p.I2C1));
     gs.disp = Some(ShiftRegister::new(p.GPIOA, 24));
+    gs.tim = Some(tim::Timer(p.TIM2));
     gs.i2c.as_ref().unwrap().init(p.RCC, 0x01, 400_000, i2c::DutyType::DUTY1, true);
+    gs.tim.as_ref().unwrap().init(16_000_000);
+    gs.tim.as_ref().unwrap().go();
     //i2c.init(0x01, 100_000, i2c::DutyType::DUTY1, false);
     gs.disp.as_ref().unwrap().output_bits(0);
+    gs.i2c_inited = true;
 }
 
 fn set_clock() {
