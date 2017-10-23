@@ -2,6 +2,7 @@ use i2c::{I2C, TransDir, DutyType};
 
 const DS3231_ADDR: u8 = 0b1101000;
 const DS3231_REG_SEC: u8 = 0x00;
+const DS3231_REG_DATE: u8 = 0x04;
 const DS3231_REG_CTL: u8 = 0x0e;
 const DS3231_REG_TEMP: u8 = 0x11;
 
@@ -24,15 +25,16 @@ pub struct Temp {
     pub quarter: u8
 }
 
+fn bcd2dec(bcd: u8) -> u8 {
+    (bcd >> 4) * 10 + (bcd & 0x0f)
+}
+
+fn dec2bcd(dec: u8) -> u8 {
+    ((dec / 10) << 4) | (dec % 10)
+}
+
+
 impl<'a> DS3231<'a> {
-    fn bcd2dec(bcd: u8) -> u8 {
-        (bcd >> 4) * 10 + (bcd & 0x0f)
-    }
-
-    fn dec2bcd(dec: u8) -> u8 {
-        ((dec / 10) << 4) | (dec % 10)
-    }
-
     fn read_register(&self, start: u8, size: usize, buf: &mut [u8]){
         let &DS3231(ref i2c) = self;
         i2c.conf_ack(true); /* enable ack */
@@ -69,16 +71,16 @@ impl<'a> DS3231<'a> {
         let hour = if am_enabled {
             (buf[2] & 0x0f) + ((buf[2] >> 4) & 1) * 10
         } else {
-            DS3231::bcd2dec(buf[2])
+            bcd2dec(buf[2])
         };
         let am = if am_enabled {(buf[2] >> 5) & 1 == 0} else {hour < 12};
-        Date{second: DS3231::bcd2dec(buf[0]),
-             minute: DS3231::bcd2dec(buf[1]),
+        Date{second: bcd2dec(buf[0]),
+             minute: bcd2dec(buf[1]),
              hour,
-             day: DS3231::bcd2dec(buf[3]),
-             date: DS3231::bcd2dec(buf[4]),
-             month: DS3231::bcd2dec(buf[5]),
-             year: DS3231::bcd2dec(buf[6]),
+             day: bcd2dec(buf[3]),
+             date: bcd2dec(buf[4]),
+             month: bcd2dec(buf[5]),
+             year: bcd2dec(buf[6]),
              am,
              am_enabled}
     }
@@ -88,16 +90,36 @@ impl<'a> DS3231<'a> {
             (1 << 6) | ((if date.am {0} else {1}) << 5) |
             ((date.hour / 10) << 4) | (date.hour % 10)
         } else {
-            DS3231::dec2bcd(date.hour)
+            dec2bcd(date.hour)
         };
-        let buf: [u8; 7] = [DS3231::dec2bcd(date.second),
-                            DS3231::dec2bcd(date.minute),
+        let buf: [u8; 7] = [dec2bcd(date.second),
+                            dec2bcd(date.minute),
                             hour,
-                            DS3231::dec2bcd(date.day),
-                            DS3231::dec2bcd(date.date),
-                            DS3231::dec2bcd(date.month),
-                            DS3231::dec2bcd(date.year)];
-        self.write_register(DS3231_REG_SEC, 7, &buf);
+                            dec2bcd(date.day),
+                            dec2bcd(date.date),
+                            dec2bcd(date.month),
+                            dec2bcd(date.year)];
+        self.write_register(DS3231_REG_SEC, buf.len(), &buf);
+    }
+
+    pub fn write_time(&self, date: &Date) {
+        let hour = if date.am_enabled {
+            (1 << 6) | ((if date.am {0} else {1}) << 5) |
+            ((date.hour / 10) << 4) | (date.hour % 10)
+        } else {
+            dec2bcd(date.hour)
+        };
+        let buf: [u8; 3] = [dec2bcd(date.second),
+                            dec2bcd(date.minute),
+                            hour];
+        self.write_register(DS3231_REG_SEC, buf.len(), &buf);
+    }
+
+    pub fn write_date(&self, date: &Date) {
+        let buf: [u8; 3] = [dec2bcd(date.date),
+                            dec2bcd(date.month),
+                            dec2bcd(date.year)];
+        self.write_register(DS3231_REG_DATE, buf.len(), &buf);
     }
 
     pub fn write_control(&self) {
