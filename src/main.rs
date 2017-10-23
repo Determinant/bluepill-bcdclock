@@ -52,7 +52,7 @@ struct GlobalState {
     perip: Option<Peripherals<'static>>,
     disp_on: bool,
     pidx: usize,
-    panels: [&'static Panel; 2],
+    panels: [&'static Panel; 3],
 }
 
 struct Button<'a> {
@@ -62,9 +62,9 @@ struct Button<'a> {
 }
 
 enum ButtonResult {
-    FALSE_ALARM,
-    SHORT_PRESS,
-    LONG_PRSSS
+    FalseAlarm,
+    ShortPress,
+    LongPress
 }
 
 impl<'a> Button<'a> {
@@ -89,9 +89,9 @@ impl<'a> Button<'a> {
         if self.state.get() {
             self.timer.stop();
             self.state.set(false);
-            if self.long.get() { ButtonResult::LONG_PRSSS }
-            else { ButtonResult::SHORT_PRESS }
-        } else { ButtonResult::FALSE_ALARM }
+            if self.long.get() { ButtonResult::LongPress }
+            else { ButtonResult::ShortPress }
+        } else { ButtonResult::FalseAlarm }
     }
 
     fn timeout(&self) {
@@ -110,10 +110,11 @@ trait Panel {
 
 #[derive(PartialEq, Clone, Copy)]
 enum TimePanelState {
+    INACTIVE,
     VIEW,
-    EDIT_HR,
-    EDIT_MIN,
-    EDIT_SEC
+    EditHr,
+    EditMin,
+    EditSec,
 }
 
 struct TimePanel<'a> {
@@ -129,19 +130,25 @@ impl<'a> Panel for TimePanel<'a> {
         {
             let mut tmp = self.tmp.borrow_mut();
             match self.state.get() {
-                VIEW => return false, /* yield to the next panel */
-                EDIT_HR => {
+                VIEW => {
+                    self.state.set(INACTIVE);
+                    return false;
+                }, /* yield to the next panel */
+                EditHr => {
                     tmp.hr += 1;
                     if tmp.hr == 24 { tmp.hr = 0 };
                 },
-                EDIT_MIN => {
+                EditMin => {
                     tmp.min += 1;
                     if tmp.min == 60 { tmp.min = 0 };
                 },
-                EDIT_SEC => {
+                EditSec => {
                     tmp.sec += 1;
                     if tmp.sec == 60 { tmp.sec = 0 };
                 },
+                INACTIVE => {
+                    self.state.set(VIEW);
+                }
             };
         }
         self.update_output();
@@ -157,11 +164,11 @@ impl<'a> Panel for TimePanel<'a> {
                 tmp.hr = time.hr;
                 tmp.min = time.min;
                 tmp.sec = time.sec;
-                EDIT_HR
+                EditHr
             },
-            EDIT_HR => EDIT_MIN,
-            EDIT_MIN => EDIT_SEC,
-            EDIT_SEC => {
+            EditHr => EditMin,
+            EditMin => EditSec,
+            EditSec => {
                 let tmp = self.tmp.borrow();
                 ds3231::DS3231(self.gs.i2c.as_ref().unwrap())
                                 .write_time(&ds3231::Date{second: tmp.sec,
@@ -175,7 +182,8 @@ impl<'a> Panel for TimePanel<'a> {
                                                          am_enabled: false});
                 *self.time.borrow_mut() = *tmp;
                 VIEW
-            }
+            },
+            s => s
         };
         self.state.set(s);
         self.update_output();
@@ -186,10 +194,10 @@ impl<'a> Panel for TimePanel<'a> {
         use TimePanelState::*;
         let s = self.state.get();
         self.gs.update_blinky(match s {
-            VIEW => [false; 6],
-            EDIT_HR => [false, false, false, false, true, true],
-            EDIT_MIN => [false, false, true, true, false, false],
-            EDIT_SEC => [true, true, false, false, false, false]
+            EditHr => [false, false, false, false, true, true],
+            EditMin => [false, false, true, true, false, false],
+            EditSec => [true, true, false, false, false, false],
+            _ => [false; 6],
         });
         let time = self.time.borrow();
         let tmp = self.tmp.borrow();
@@ -204,13 +212,14 @@ impl<'a> Panel for TimePanel<'a> {
 impl<'a> TimePanel<'a> {
     fn update_clock(&self, clk: Option<Time>) {
         let mut time = self.time.borrow_mut();
+        let gs = self.gs;
         match clk {
             Some(clk) => *time = clk,
             None => time.tick()
         }
-        if self.gs.pidx == 0 && self.state.get() == TimePanelState::VIEW {
-            self.gs.render3(time.hr, time.min, time.sec);
-            self.gs.display();
+        if self.state.get() == TimePanelState::VIEW {
+            gs.render3(time.hr, time.min, time.sec);
+            gs.display();
         }
     }
 }
@@ -224,10 +233,11 @@ struct Date {
 
 #[derive(PartialEq, Clone, Copy)]
 enum DatePanelState {
+    INACTIVE,
     VIEW,
-    EDIT_YR,
-    EDIT_MON,
-    EDIT_DAY
+    EditYr,
+    EditMon,
+    EditDay
 }
 
 struct DatePanel<'a> {
@@ -243,19 +253,25 @@ impl<'a> Panel for DatePanel<'a> {
         {
             let mut tmp = self.tmp.borrow_mut();
             match self.state.get() {
-                VIEW => return false, /* yield to the next panel */
-                EDIT_YR => {
+                VIEW => {
+                    self.state.set(INACTIVE);
+                    return false;
+                }, /* yield to the next panel */
+                EditYr => {
                     if tmp.yr == 255 { tmp.yr = 0 }
                     else { tmp.yr += 1 };
                 },
-                EDIT_MON => {
+                EditMon => {
                     tmp.mon += 1;
                     if tmp.mon == 13 { tmp.mon = 1 };
                 },
-                EDIT_DAY => {
+                EditDay => {
                     tmp.day += 1;
                     if tmp.day == 32 { tmp.day = 1 };
                 },
+                INACTIVE => {
+                    self.state.set(VIEW);
+                }
             };
         }
         self.update_output();
@@ -271,11 +287,11 @@ impl<'a> Panel for DatePanel<'a> {
                 tmp.yr = date.yr;
                 tmp.mon = date.mon;
                 tmp.day = date.day;
-                EDIT_YR
+                EditYr
             },
-            EDIT_YR => EDIT_MON,
-            EDIT_MON => EDIT_DAY,
-            EDIT_DAY => {
+            EditYr => EditMon,
+            EditMon => EditDay,
+            EditDay => {
                 let tmp = self.tmp.borrow();
                 ds3231::DS3231(self.gs.i2c.as_ref().unwrap())
                                 .write_date(&ds3231::Date{second: 0,
@@ -289,7 +305,8 @@ impl<'a> Panel for DatePanel<'a> {
                                                          am_enabled: false});
                 *self.date.borrow_mut() = *tmp;
                 VIEW
-            }
+            },
+            s => s
         };
         self.state.set(s);
         self.update_output();
@@ -300,10 +317,10 @@ impl<'a> Panel for DatePanel<'a> {
         use DatePanelState::*;
         let s = self.state.get();
         self.gs.update_blinky(match s{
-            VIEW => [false; 6],
-            EDIT_YR => [false, false, false, false, true, true],
-            EDIT_MON => [false, false, true, true, false, false],
-            EDIT_DAY => [true, true, false, false, false, false]
+            EditYr => [false, false, false, false, true, true],
+            EditMon => [false, false, true, true, false, false],
+            EditDay => [true, true, false, false, false, false],
+            _ => [false; 6],
         });
         let date = self.date.borrow();
         let tmp = self.tmp.borrow();
@@ -322,9 +339,71 @@ impl<'a> DatePanel<'a> {
             Some(d) => *date = d,
             None => ()
         }
-        if self.gs.pidx == 1 && self.state.get() == DatePanelState::VIEW {
+        if self.state.get() == DatePanelState::VIEW {
             self.gs.render3(date.yr, date.mon, date.day);
             self.gs.display();
+        }
+    }
+}
+
+#[derive(PartialEq, Copy, Clone)]
+enum TempPanelState {
+    INACTIVE,
+    VIEW
+}
+
+struct TempPanel<'a> {
+    state: Cell<TempPanelState>,
+    temp: Cell<ds3231::Temp>,
+    gs: &'a GlobalState,
+}
+
+impl<'a> Panel for TempPanel<'a> {
+    fn btn1_short(&self) -> bool {
+        use TempPanelState::*;
+        match self.state.get() {
+            VIEW => {
+                self.state.set(INACTIVE);
+                return false;
+            },
+            INACTIVE =>  {
+                self.state.set(VIEW);
+            }
+        }
+        self.update_output();
+        true
+    }
+
+    fn update_output(&self) {
+        let mut buff: [u8; 6] = [0xf; 6];
+        let temp = self.temp.get();
+        let q = temp.quarter * 25;
+        let zeros: [u8; 4] = [0; 4];
+        let mut c = if temp.cels > 0 { temp.cels } else {
+            buff[2..6].clone_from_slice(&zeros);
+            -temp.cels
+        } as u8;
+        let mut i = 2;
+        while c > 0 {
+            buff[i] = c % 10;
+            c /= 10;
+            i += 1;
+        }
+        buff[1] = q / 10;
+        buff[0] = q - 10 * buff[1];
+        *self.gs.buff.borrow_mut() = buff;
+        self.gs.display();
+    }
+}
+
+impl<'a> TempPanel<'a> {
+    fn update_clock(&self, temp: Option<ds3231::Temp>) {
+        match temp {
+            Some(temp) => self.temp.set(temp),
+            None => ()
+        }
+        if self.state.get() == TempPanelState::VIEW {
+            self.update_output();
         }
     }
 }
@@ -333,9 +412,12 @@ static mut TPANEL: TimePanel = TimePanel{state: Cell::new(TimePanelState::VIEW),
                                         tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
                                         time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
                                         gs: unsafe{&GS}};
-static mut DPANEL: DatePanel = DatePanel{state: Cell::new(DatePanelState::VIEW),
+static mut DPANEL: DatePanel = DatePanel{state: Cell::new(DatePanelState::INACTIVE),
                                         tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
                                         date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
+                                        gs: unsafe{&GS}};
+static mut TEMP_PANEL: TempPanel = TempPanel{state: Cell::new(TempPanelState::INACTIVE),
+                                        temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
                                         gs: unsafe{&GS}};
 
 static mut GS: GlobalState =
@@ -350,7 +432,7 @@ static mut GS: GlobalState =
                 blinky: RefCell::new([false; 6]),
                 blink_state: Cell::new(false),
                 pidx: 0,
-                panels: unsafe {[&TPANEL, &DPANEL]}
+                panels: unsafe {[&TPANEL, &DPANEL, &TEMP_PANEL]}
     };
 
 fn get_gs() -> &'static mut GlobalState {
@@ -412,6 +494,7 @@ impl GlobalState {
     fn update_clock(&mut self) {
         let mut clk = None;
         let mut d = None;
+        let mut temp = None;
         if self.sync_cnt == 0 {
             let rtc = ds3231::DS3231(self.i2c.as_ref().unwrap());
             let ds3231::Date{second: sec,
@@ -423,17 +506,17 @@ impl GlobalState {
             self.sync_cnt = SYNC_PERIOD;
             clk = Some(Time{sec, min, hr});
             d = Some(Date{yr, mon, day});
+            temp = Some(rtc.read_temperature());
         } else {
             self.sync_cnt -= 1;
         }
         unsafe {
             TPANEL.update_clock(clk);
             DPANEL.update_clock(d);
+            TEMP_PANEL.update_clock(temp);
         }
     }
-
-
-    fn set_time(&mut self) {
+        /*
         let rtc = ds3231::DS3231(self.i2c.as_ref().unwrap());
         rtc.write_fulldate(&ds3231::Date{second: 30,
                                 minute: 23,
@@ -444,6 +527,7 @@ impl GlobalState {
                                 year: 17,
                                 am: false,
                                 am_enabled: false});
+        */
         /*
         let rom = ROM.as_ref().unwrap();
         let mut buf: [u8; 64] = [23; 64];
@@ -451,7 +535,6 @@ impl GlobalState {
         let mut buf2: [u8; 80] = [0; 80];
         rom.read(20, 80, &mut buf2);
         */
-    }
 }
 
 fn systick_handler() {
@@ -472,17 +555,17 @@ fn exti3_handler() {
     } else {
         let gs = get_gs();
         match btn1.release() {
-            ButtonResult::FALSE_ALARM => (),
-            ButtonResult::SHORT_PRESS => {
+            ButtonResult::FalseAlarm => (),
+            ButtonResult::ShortPress => {
                 if !gs.panels[gs.pidx].btn1_short() {
                     gs.pidx += 1;
                     if gs.pidx == gs.panels.len() {
                         gs.pidx = 0;
                     }
-                    gs.panels[gs.pidx].update_output();
+                    gs.panels[gs.pidx].btn1_short();
                 }
             },
-            ButtonResult::LONG_PRSSS => { gs.panels[gs.pidx].btn2_short(); }
+            ButtonResult::LongPress => { gs.panels[gs.pidx].btn2_short(); }
         }
         gs.display();
     }

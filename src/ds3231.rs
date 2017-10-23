@@ -20,6 +20,7 @@ pub struct Date {
     pub am_enabled: bool
 }
 
+#[derive(Copy, Clone)]
 pub struct Temp {
     pub cels: i8,
     pub quarter: u8
