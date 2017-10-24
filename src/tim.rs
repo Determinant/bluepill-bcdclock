@@ -22,18 +22,22 @@ impl<'a> Timer<'a> {
         self.0.arr.write(|w| w.arr().bits(arr));
     }
 
+    #[inline]
     pub fn is_enabled(&self) -> bool {
         self.0.cr1.read().cen() == tim1::cr1::CENR::ENABLED
     }
 
+    #[inline]
     pub fn reset(&self) {
         self.0.cnt.write(|w| w.cnt().bits(0));
     }
 
+    #[inline]
     pub fn go(&self) {
         self.0.cr1.modify(|_, w| w.cen().enabled());
     }
 
+    #[inline]
     pub fn stop(&self) {
         self.0.cr1.modify(|_, w| w.cen().disabled());
     }

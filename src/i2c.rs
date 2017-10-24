@@ -27,7 +27,6 @@ pub enum DutyType {
 }
 
 impl<'a> I2C<'a> {
-    #[inline(always)]
     fn get_pclk1(rcc: &RCC) -> u32 {
         use stm32f103xx::rcc::cfgr::{SWSR, PLLSRCR, PLLXTPRER};
         let cfgr = rcc.cfgr.read();

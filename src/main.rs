@@ -5,9 +5,7 @@
 #[macro_use] extern crate stm32f103xx;
 extern crate cortex_m;
 
-use stm32f103xx::{GPIOA, GPIOB, RCC, SYST, I2C1, EXTI, NVIC, Interrupt, AFIO, Peripherals};
-use stm32f103xx::{gpioa};
-use cortex_m::peripheral::SystClkSource;
+use stm32f103xx::{Interrupt, Peripherals, gpioa};
 use core::cell::{Cell, RefCell};
 
 mod mutex;
@@ -16,9 +14,7 @@ mod ds3231;
 mod at24c;
 mod tim;
 
-const SYNC_PERIOD: u8 = 10;
-const BLINK_PERIOD: u32 = 500;
-
+#[inline]
 fn digits2bcds(digs: &[u8]) -> u32 {
     let mut res: u32 = 0;
     for d in digs.iter().rev() {
@@ -27,12 +23,19 @@ fn digits2bcds(digs: &[u8]) -> u32 {
     res
 }
 
+fn inc_rotate(n: &mut u8, reset: u8, limit: u8) {
+    *n += 1;
+    if *n == limit {
+        *n = reset;
+    }
+}
+
 struct ShiftRegister<'a> {
     gpioa: &'a gpioa::RegisterBlock,
     width: u8,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy)]
 struct Time {
     sec: u8,
     min: u8,
@@ -40,19 +43,18 @@ struct Time {
 }
 
 struct GlobalState {
+    perip: Option<Peripherals<'static>>,
     disp: Option<ShiftRegister<'static>>,
-    i2c: Option<i2c::I2C<'static>>,
     btn1: Option<Button<'static>>,
-    //tim: Option<tim::Timer<'static>>,
+    i2c: Option<i2c::I2C<'static>>,
     i2c_inited: bool,
-    sync_cnt: u8,
+    sync_cnt: Cell<u8>,
     buff: RefCell<[u8; 6]>,
+    disp_on: bool,
     blinky: RefCell<[bool; 6]>,
     blink_state: Cell<bool>,
-    perip: Option<Peripherals<'static>>,
-    disp_on: bool,
     pidx: usize,
-    panels: [&'static Panel; 3],
+    panels: [&'static Panel; 4],
 }
 
 struct Button<'a> {
@@ -65,6 +67,133 @@ enum ButtonResult {
     FalseAlarm,
     ShortPress,
     LongPress
+}
+
+trait Panel {
+    fn btn1_short(&self) -> bool {false}
+    fn btn1_long(&self) -> bool {false}
+    fn btn2_short(&self) -> bool {false}
+    fn btn2_long(&self) -> bool {false}
+    fn update_output(&self);
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum TimePanelState {
+    Inactive,
+    View,
+    EditHr,
+    EditMin,
+    EditSec,
+}
+
+struct TimePanel<'a> {
+    gs: &'a GlobalState,
+    state: Cell<TimePanelState>, 
+    time: RefCell<Time>,
+    tmp: RefCell<Time>
+}
+
+#[derive(Clone, Copy)]
+struct Date {
+    yr: u8,
+    mon: u8,
+    day: u8
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum DatePanelState {
+    Inactive,
+    View,
+    EditYr,
+    EditMon,
+    EditDay
+}
+
+struct DatePanel<'a> {
+    gs: &'a GlobalState,
+    state: Cell<DatePanelState>,
+    date: RefCell<Date>,
+    tmp: RefCell<Date>
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum TempPanelState {
+    Inactive,
+    View
+}
+
+struct TempPanel<'a> {
+    state: Cell<TempPanelState>,
+    temp: Cell<ds3231::Temp>,
+    gs: &'a GlobalState,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum CountdownPanelState {
+    Inactive,
+    View,
+    EditWhole,
+    Edit3,
+    Edit2,
+    Edit1,
+    Edit0,
+    Edit2m,
+    Edit1m,
+    OnGoing,
+    OnGoingPaused,
+    TimeUp
+}
+
+struct CountdownPanel<'a> {
+    state: Cell<CountdownPanelState>,
+    presets: RefCell<[[u8; 6]; 2]>,
+    counter: Cell<u32>,
+    didx: Cell<u8>,
+    gs: &'a GlobalState,
+}
+
+impl<'a> ShiftRegister<'a> {
+    fn new(gpioa: &'a gpioa::RegisterBlock,
+           width: u8) -> Self {
+        ShiftRegister{gpioa, width}
+    }
+
+    fn output_bits(&self, bits: u32) {
+        let bsrr = &self.gpioa.bsrr;
+        for i in (0..self.width).rev() {
+            bsrr.write(|w| w.br1().reset());
+            /* feed the ser */
+            match (bits >> i) & 1 {
+                0 => bsrr.write(|w| w.br0().reset()),
+                1 => bsrr.write(|w| w.bs0().set()),
+                _ => panic!()
+            }
+            /* shift (trigger the sclk) */
+            bsrr.write(|w| w.bs1().set());
+        }
+        /* latch on (trigger the clk) */
+        bsrr.write(|w| w.br2().reset());
+        bsrr.write(|w| w.bs2().set());
+    }
+}
+
+impl Time {
+    fn tick(&mut self) {
+        self.sec += 1;
+        if self.sec == 60 {
+            self.min += 1;
+            self.sec = 0;
+        }
+
+        if self.min == 60 {
+            self.hr += 1;
+            self.min = 0;
+        }
+
+        if self.hr == 24 {
+            self.hr = 0;
+        }
+    }
 }
 
 impl<'a> Button<'a> {
@@ -100,55 +229,20 @@ impl<'a> Button<'a> {
     }
 }
 
-trait Panel {
-    fn btn1_short(&self) -> bool {false}
-    fn btn1_long(&self) -> bool {false}
-    fn btn2_short(&self) -> bool {false}
-    fn btn2_long(&self) -> bool {false}
-    fn update_output(&self);
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum TimePanelState {
-    INACTIVE,
-    VIEW,
-    EditHr,
-    EditMin,
-    EditSec,
-}
-
-struct TimePanel<'a> {
-    gs: &'a GlobalState,
-    state: Cell<TimePanelState>, 
-    time: RefCell<Time>,
-    tmp: RefCell<Time>
-}
-
 impl<'a> Panel for TimePanel<'a> {
     fn btn1_short(&self) -> bool {
         use TimePanelState::*;
         {
             let mut tmp = self.tmp.borrow_mut();
             match self.state.get() {
-                VIEW => {
-                    self.state.set(INACTIVE);
+                View => {
+                    self.state.set(Inactive);
                     return false;
                 }, /* yield to the next panel */
-                EditHr => {
-                    tmp.hr += 1;
-                    if tmp.hr == 24 { tmp.hr = 0 };
-                },
-                EditMin => {
-                    tmp.min += 1;
-                    if tmp.min == 60 { tmp.min = 0 };
-                },
-                EditSec => {
-                    tmp.sec += 1;
-                    if tmp.sec == 60 { tmp.sec = 0 };
-                },
-                INACTIVE => {
-                    self.state.set(VIEW);
-                }
+                EditHr => inc_rotate(&mut tmp.hr, 0, 24),
+                EditMin => inc_rotate(&mut tmp.min, 0, 60),
+                EditSec => inc_rotate(&mut tmp.sec, 0, 60),
+                Inactive => self.state.set(View)
             };
         }
         self.update_output();
@@ -158,7 +252,7 @@ impl<'a> Panel for TimePanel<'a> {
     fn btn2_short(&self) -> bool {
         use TimePanelState::*;
         let s = match self.state.get() {
-            VIEW => {
+            View => {
                 let mut tmp = self.tmp.borrow_mut();
                 let time = self.time.borrow();
                 tmp.hr = time.hr;
@@ -181,28 +275,28 @@ impl<'a> Panel for TimePanel<'a> {
                                                          am: false,
                                                          am_enabled: false});
                 *self.time.borrow_mut() = *tmp;
-                VIEW
+                View
             },
             s => s
         };
         self.state.set(s);
         self.update_output();
-        self.state.get() == VIEW
+        true
     }
 
     fn update_output(&self) {
         use TimePanelState::*;
         let s = self.state.get();
         self.gs.update_blinky(match s {
-            EditHr => [false, false, false, false, true, true],
-            EditMin => [false, false, true, true, false, false],
-            EditSec => [true, true, false, false, false, false],
-            _ => [false; 6],
+            EditHr => 0b110000,
+            EditMin => 0b001100,
+            EditSec => 0b000011,
+            _ => 0x0,
         });
         let time = self.time.borrow();
         let tmp = self.tmp.borrow();
         match s {
-            VIEW => self.gs.render3(time.hr, time.min, time.sec),
+            View => self.gs.render3(time.hr, time.min, time.sec),
             _ => self.gs.render3(tmp.hr, tmp.min, tmp.sec)
         };
         self.gs.display();
@@ -217,34 +311,11 @@ impl<'a> TimePanel<'a> {
             Some(clk) => *time = clk,
             None => time.tick()
         }
-        if self.state.get() == TimePanelState::VIEW {
+        if self.state.get() == TimePanelState::View {
             gs.render3(time.hr, time.min, time.sec);
             gs.display();
         }
     }
-}
-
-#[derive(Clone, Copy)]
-struct Date {
-    yr: u8,
-    mon: u8,
-    day: u8
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum DatePanelState {
-    INACTIVE,
-    VIEW,
-    EditYr,
-    EditMon,
-    EditDay
-}
-
-struct DatePanel<'a> {
-    gs: &'a GlobalState,
-    state: Cell<DatePanelState>, 
-    date: RefCell<Date>,
-    tmp: RefCell<Date>
 }
 
 impl<'a> Panel for DatePanel<'a> {
@@ -253,25 +324,14 @@ impl<'a> Panel for DatePanel<'a> {
         {
             let mut tmp = self.tmp.borrow_mut();
             match self.state.get() {
-                VIEW => {
-                    self.state.set(INACTIVE);
+                View => {
+                    self.state.set(Inactive);
                     return false;
                 }, /* yield to the next panel */
-                EditYr => {
-                    if tmp.yr == 255 { tmp.yr = 0 }
-                    else { tmp.yr += 1 };
-                },
-                EditMon => {
-                    tmp.mon += 1;
-                    if tmp.mon == 13 { tmp.mon = 1 };
-                },
-                EditDay => {
-                    tmp.day += 1;
-                    if tmp.day == 32 { tmp.day = 1 };
-                },
-                INACTIVE => {
-                    self.state.set(VIEW);
-                }
+                EditYr => inc_rotate(&mut tmp.yr, 0, 100),
+                EditMon => inc_rotate(&mut tmp.mon, 1, 13),
+                EditDay => inc_rotate(&mut tmp.day, 1, 32),
+                Inactive => self.state.set(View)
             };
         }
         self.update_output();
@@ -281,7 +341,7 @@ impl<'a> Panel for DatePanel<'a> {
     fn btn2_short(&self) -> bool {
         use DatePanelState::*;
         let s = match self.state.get() {
-            VIEW => {
+            View => {
                 let date = self.date.borrow();
                 let mut tmp = self.tmp.borrow_mut();
                 tmp.yr = date.yr;
@@ -304,28 +364,28 @@ impl<'a> Panel for DatePanel<'a> {
                                                          am: false,
                                                          am_enabled: false});
                 *self.date.borrow_mut() = *tmp;
-                VIEW
+                View
             },
             s => s
         };
         self.state.set(s);
         self.update_output();
-        self.state.get() == VIEW
+        true
     }
 
     fn update_output(&self) {
         use DatePanelState::*;
         let s = self.state.get();
         self.gs.update_blinky(match s{
-            EditYr => [false, false, false, false, true, true],
-            EditMon => [false, false, true, true, false, false],
-            EditDay => [true, true, false, false, false, false],
-            _ => [false; 6],
+            EditYr => 0b110000,
+            EditMon => 0b001100,
+            EditDay => 0b000011,
+            _ => 0x0,
         });
         let date = self.date.borrow();
         let tmp = self.tmp.borrow();
         match s {
-            VIEW => self.gs.render3(date.yr, date.mon, date.day),
+            View => self.gs.render3(date.yr, date.mon, date.day),
             _ => self.gs.render3(tmp.yr, tmp.mon, tmp.day)
         };
         self.gs.display();
@@ -339,35 +399,23 @@ impl<'a> DatePanel<'a> {
             Some(d) => *date = d,
             None => ()
         }
-        if self.state.get() == DatePanelState::VIEW {
+        if self.state.get() == DatePanelState::View {
             self.gs.render3(date.yr, date.mon, date.day);
             self.gs.display();
         }
     }
 }
 
-#[derive(PartialEq, Copy, Clone)]
-enum TempPanelState {
-    INACTIVE,
-    VIEW
-}
-
-struct TempPanel<'a> {
-    state: Cell<TempPanelState>,
-    temp: Cell<ds3231::Temp>,
-    gs: &'a GlobalState,
-}
-
 impl<'a> Panel for TempPanel<'a> {
     fn btn1_short(&self) -> bool {
         use TempPanelState::*;
         match self.state.get() {
-            VIEW => {
-                self.state.set(INACTIVE);
+            View => {
+                self.state.set(Inactive);
                 return false;
             },
-            INACTIVE =>  {
-                self.state.set(VIEW);
+            Inactive => {
+                self.state.set(View);
             }
         }
         self.update_output();
@@ -402,44 +450,138 @@ impl<'a> TempPanel<'a> {
             Some(temp) => self.temp.set(temp),
             None => ()
         }
-        if self.state.get() == TempPanelState::VIEW {
+        if self.state.get() == TempPanelState::View {
             self.update_output();
         }
     }
 }
 
-static mut TPANEL: TimePanel = TimePanel{state: Cell::new(TimePanelState::VIEW),
-                                        tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
-                                        time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
-                                        gs: unsafe{&GS}};
-static mut DPANEL: DatePanel = DatePanel{state: Cell::new(DatePanelState::INACTIVE),
-                                        tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
-                                        date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
-                                        gs: unsafe{&GS}};
-static mut TEMP_PANEL: TempPanel = TempPanel{state: Cell::new(TempPanelState::INACTIVE),
-                                        temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
-                                        gs: unsafe{&GS}};
+impl<'a> Panel for CountdownPanel<'a> {
+    fn btn1_short(&self) -> bool {
+        use CountdownPanelState::*;
+        let tim = self.gs.perip.as_ref().unwrap().TIM3;
+        let timer = tim::Timer(tim);
+        {
+            let didx = self.didx.get();
+            let mut presets = self.presets.borrow_mut();
+            let len = presets.len() as u8;
+            let p = &mut presets[didx as usize];
+            match self.state.get() {
+                View => {
+                    self.state.set(Inactive);
+                    return false;
+                },
+                EditWhole => {
+                    let mut nidx = didx;
+                    inc_rotate(&mut nidx, 0, len);
+                    self.didx.set(nidx);
+                },
+                Edit3 => inc_rotate(&mut p[5], 0, 10),
+                Edit2 => inc_rotate(&mut p[4], 0, 10),
+                Edit1 => inc_rotate(&mut p[3], 0, 10),
+                Edit0 => inc_rotate(&mut p[2], 0, 10),
+                Edit2m => inc_rotate(&mut p[1], 0, 10),
+                Edit1m => inc_rotate(&mut p[0], 0, 10),
+                OnGoing => {
+                    timer.stop();
+                    self.state.set(OnGoingPaused);
+                },
+                OnGoingPaused => {
+                    timer.go();
+                    self.state.set(OnGoing);
+                },
+                TimeUp => self.state.set(View),
+                Inactive => self.state.set(View)
+            }
+        }
+        self.update_output();
+        true
+    }
 
-static mut GS: GlobalState =
-    GlobalState{disp: None,
-                i2c: None,
-                sync_cnt: 0,
-                btn1: None,
-                i2c_inited: false,
-                buff: RefCell::new([0; 6]),
-                perip: None,
-                disp_on: true,
-                blinky: RefCell::new([false; 6]),
-                blink_state: Cell::new(false),
-                pidx: 0,
-                panels: unsafe {[&TPANEL, &DPANEL, &TEMP_PANEL]}
-    };
+    fn btn2_short(&self) -> bool {
+        use CountdownPanelState::*;
+        let tim = self.gs.perip.as_ref().unwrap().TIM3;
+        let timer = tim::Timer(tim);
+        let s = match self.state.get() {
+            View => EditWhole,
+            EditWhole => Edit3,
+            Edit3 => Edit2,
+            Edit2 => Edit1,
+            Edit1 => Edit0,
+            Edit0 => Edit2m,
+            Edit2m => Edit1m,
+            Edit1m => {
+                let p = &self.presets.borrow()[self.didx.get() as usize];
+                let mut x: u32 = 0;
+                for v in p.iter().rev() {
+                    x *= 10;
+                    x += *v as u32;
+                }
+                self.counter.set(x);
+                timer.reset();
+                timer.go();
+                OnGoing
+            },
+            OnGoingPaused => View,
+            s => s
+        };
+        self.state.set(s);
+        self.update_output();
+        true
+    }
 
-fn get_gs() -> &'static mut GlobalState {
-    unsafe {&mut GS}
+    fn update_output(&self) {
+        use CountdownPanelState::*;
+        let s = self.state.get();
+        self.gs.update_blinky(match s {
+            EditWhole => 0b111111,
+            Edit3 => 0b100000,
+            Edit2 => 0b010000,
+            Edit1 => 0b001000,
+            Edit0 => 0b000100,
+            Edit2m => 0b000010,
+            Edit1m => 0b000001,
+            TimeUp => 0b111111,
+            _ => 0x0
+        });
+        match s {
+            OnGoing | OnGoingPaused => self.gs.render1(self.counter.get()),
+            _ => {
+                let preset = &self.presets.borrow()[self.didx.get() as usize];
+                self.gs.render(preset);
+            }
+        }
+        self.gs.display();
+    }
+}
+
+impl<'a> CountdownPanel<'a> {
+    fn update_clock(&self) {
+        let x = self.counter.get();
+        if x == 0 {
+            let tim = self.gs.perip.as_ref().unwrap().TIM3;
+            let timer = tim::Timer(tim);
+            timer.stop();
+            self.state.set(CountdownPanelState::TimeUp);
+        } else {
+            self.counter.set(x - 1);
+        }
+        self.update_output();
+    }
 }
 
 impl GlobalState {
+
+    fn render(&self, nbuff: &[u8; 6]) {
+        self.buff.borrow_mut().copy_from_slice(nbuff);
+    }
+    fn render1(&self, mut n: u32) {
+        let mut buff = self.buff.borrow_mut();
+        for i in 0..buff.len() {
+            buff[i] = (n % 10) as u8;
+            n /= 10;
+        }
+    }
 
     fn render3(&self, n1: u8, n2: u8, n3: u8) {
         let mut buff = self.buff.borrow_mut();
@@ -462,12 +604,14 @@ impl GlobalState {
         self.disp.as_ref().unwrap().output_bits(digits2bcds(&buff[..]));
     }
 
-    fn update_blinky(&self, ns: [bool; 6]) {
+    fn update_blinky(&self, nb: u8) {
         let tim4 = self.perip.as_ref().unwrap().TIM4;
         let timer = tim::Timer(tim4);
         let en = timer.is_enabled();
-        let flag = ns.iter().all(|x| !x); /* if nothing is blinking */
-        *self.blinky.borrow_mut() = ns;
+        let flag = nb == 0; /* if nothing is blinking */
+        for (i, v) in self.blinky.borrow_mut().iter_mut().enumerate() {
+            *v = ((nb >> i) & 1) == 1;
+        }
         if en && flag {
             self.blink_state.set(false);
             timer.stop();
@@ -491,11 +635,11 @@ impl GlobalState {
     }
 
  
-    fn update_clock(&mut self) {
+    fn update_clock(&self) {
         let mut clk = None;
         let mut d = None;
         let mut temp = None;
-        if self.sync_cnt == 0 {
+        if self.sync_cnt.get() == 0 {
             let rtc = ds3231::DS3231(self.i2c.as_ref().unwrap());
             let ds3231::Date{second: sec,
                             minute: min,
@@ -503,16 +647,16 @@ impl GlobalState {
                             date: day,
                             month: mon,
                             year: yr, ..} = rtc.read_fulldate();
-            self.sync_cnt = SYNC_PERIOD;
+            self.sync_cnt.set(SYNC_PERIOD);
             clk = Some(Time{sec, min, hr});
             d = Some(Date{yr, mon, day});
             temp = Some(rtc.read_temperature());
         } else {
-            self.sync_cnt -= 1;
+            self.sync_cnt.set(self.sync_cnt.get() - 1);
         }
         unsafe {
-            TPANEL.update_clock(clk);
-            DPANEL.update_clock(d);
+            TIME_PANEL.update_clock(clk);
+            DATE_PANEL.update_clock(d);
             TEMP_PANEL.update_clock(temp);
         }
     }
@@ -535,6 +679,41 @@ impl GlobalState {
         let mut buf2: [u8; 80] = [0; 80];
         rom.read(20, 80, &mut buf2);
         */
+        /*
+        let x = mutex::Mutex::new(42);
+        {
+            let y = x.lock();
+            let z = *y + 1;
+            let w = z;
+        }
+        */
+    #[inline(always)]
+    fn tim4_callback() {
+        let gs = get_gs();
+        {
+            let p = gs.perip.as_ref().unwrap();
+            p.TIM4.sr.modify(|_, w| w.uif().clear());
+        }
+        gs.blink_state.set(!gs.blink_state.get());
+        gs.display();
+    }
+
+    #[inline(always)]
+    fn tim3_callback() {
+        let gs = get_gs();
+        {
+            let p = gs.perip.as_ref().unwrap();
+            p.TIM3.sr.modify(|_, w| w.uif().clear());
+        }
+        unsafe {
+            CD_PANEL.update_clock();
+        }
+    }
+}
+
+#[inline(always)]
+fn get_gs() -> &'static mut GlobalState {
+    unsafe {&mut GS}
 }
 
 fn systick_handler() {
@@ -578,65 +757,50 @@ fn tim2_handler() {
     gs.btn1.as_ref().unwrap().timeout();
 }
 
-fn tim4_handler() {
-    let gs = get_gs();
-    {
-        let p = gs.perip.as_ref().unwrap();
-        p.TIM4.sr.modify(|_, w| w.uif().clear());
-    }
-    gs.blink_state.set(!gs.blink_state.get());
-    gs.display();
-}
+fn tim4_handler() { GlobalState::tim4_callback(); }
+fn tim3_handler() { GlobalState::tim3_callback(); }
 
 exception!(SYS_TICK, systick_handler);
 interrupt!(EXTI3, exti3_handler);
 interrupt!(TIM2, tim2_handler);
 interrupt!(TIM4, tim4_handler);
+interrupt!(TIM3, tim3_handler);
 
-impl<'a> ShiftRegister<'a> {
-    fn new(gpioa: &'a gpioa::RegisterBlock,
-           width: u8) -> Self {
-        let this = ShiftRegister{gpioa, width};
-        this
-    }
+const SYNC_PERIOD: u8 = 10;
+const BLINK_PERIOD: u32 = 500;
 
-    fn output_bits(&self, bits: u32) {
-        let bsrr = &self.gpioa.bsrr;
-        for i in (0..self.width).rev() {
-            bsrr.write(|w| w.br1().reset());
-            /* feed the ser */
-            match (bits >> i) & 1 {
-                0 => bsrr.write(|w| w.br0().reset()),
-                1 => bsrr.write(|w| w.bs0().set()),
-                _ => panic!()
-            }
-            /* shift (trigger the sclk) */
-            bsrr.write(|w| w.bs1().set());
-        }
-        /* latch on (trigger the clk) */
-        bsrr.write(|w| w.br2().reset());
-        bsrr.write(|w| w.bs2().set());
-    }
-}
+static mut TIME_PANEL: TimePanel = TimePanel{state: Cell::new(TimePanelState::View),
+                                        tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
+                                        time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
+                                        gs: unsafe{&GS}};
+static mut DATE_PANEL: DatePanel = DatePanel{state: Cell::new(DatePanelState::Inactive),
+                                        tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
+                                        date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
+                                        gs: unsafe{&GS}};
+static mut TEMP_PANEL: TempPanel = TempPanel{state: Cell::new(TempPanelState::Inactive),
+                                        temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
+                                        gs: unsafe{&GS}};
 
-impl Time {
-    fn tick(&mut self) {
-        self.sec += 1;
-        if self.sec == 60 {
-            self.min += 1;
-            self.sec = 0;
-        }
+static mut CD_PANEL: CountdownPanel = CountdownPanel{state: Cell::new(CountdownPanelState::Inactive),
+                                        presets: RefCell::new([[0; 6]; 2]),
+                                        counter: Cell::new(0),
+                                        didx: Cell::new(0),
+                                        gs: unsafe{&GS}};
 
-        if self.min == 60 {
-            self.hr += 1;
-            self.min = 0;
-        }
-
-        if self.hr == 24 {
-            self.hr = 0;
-        }
-    }
-}
+static mut GS: GlobalState =
+    GlobalState{perip: None,
+                disp: None,
+                btn1: None,
+                i2c: None,
+                i2c_inited: false,
+                sync_cnt: Cell::new(0),
+                buff: RefCell::new([0; 6]),
+                disp_on: true,
+                blinky: RefCell::new([false; 6]),
+                blink_state: Cell::new(false),
+                pidx: 0,
+                panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL, &CD_PANEL]}
+    };
 
 fn init() {
     let gs = get_gs();
@@ -645,7 +809,7 @@ fn init() {
         gs.perip.as_ref().unwrap()
     };
 
-    p.SYST.set_clock_source(SystClkSource::Core);
+    p.SYST.set_clock_source(cortex_m::peripheral::SystClkSource::Core);
     p.SYST.set_reload(8_000_000);
     p.SYST.enable_interrupt();
     p.SYST.enable_counter();
@@ -655,7 +819,8 @@ fn init() {
                                 .iopben().enabled()
                                 .afioen().enabled());
     p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled()
-                                 .tim4en().enabled());
+                                 .tim4en().enabled()
+                                 .tim3en().enabled());
 
     /* GPIO */
     /* enable PA0-2 for manipulating shift register */
@@ -682,6 +847,7 @@ fn init() {
     p.NVIC.enable(Interrupt::EXTI3);
     p.NVIC.enable(Interrupt::TIM2);
     p.NVIC.enable(Interrupt::TIM4);
+    p.NVIC.enable(Interrupt::TIM3);
     p.EXTI.imr.write(|w| w.mr3().set_bit());
     p.EXTI.rtsr.write(|w| w.tr3().set_bit());
     p.EXTI.ftsr.write(|w| w.tr3().set_bit());
@@ -696,18 +862,10 @@ fn init() {
 
     gs.btn1 = Some(Button::new(tim::Timer(p.TIM2), 300));
     tim::Timer(p.TIM4).init(BLINK_PERIOD * (8_000_000 / 1000));
+    tim::Timer(p.TIM3).init(10 * (8_000_000 / 1000));
+    gs.update_clock();
 }
 
 fn main() {
     init();
-    get_gs().update_clock();
-    //set_clock();
-    /*
-    let x = mutex::Mutex::new(42);
-    {
-        let y = x.lock();
-        let z = *y + 1;
-        let w = z;
-    }
-    */
 }
