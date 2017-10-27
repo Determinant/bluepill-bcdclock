@@ -58,8 +58,15 @@ struct GlobalState {
     panels: [&'static Panel; 5],
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum ButtonState {
+    Idle,
+    PressedLock,
+    PressedUnlock
+}
+
 struct Button<'a> {
-    state: Cell<bool>,
+    state: Cell<ButtonState>,
     long: Cell<bool>,
     timer: tim::Timer<'a>
 }
@@ -212,27 +219,26 @@ impl Time {
 }
 
 impl<'a> Button<'a> {
-    fn new(timer: tim::Timer<'a>, thres: u32) -> Self {
-        /* in milliseconds */
-        timer.init(thres * (8_000_000 / 1000));
-        Button {state: Cell::new(false),
+    fn new(timer: tim::Timer<'a>) -> Self {
+        Button {state: Cell::new(ButtonState::Idle),
                 long: Cell::new(false),
                 timer}
     }
 
     fn press(&self) {
-        if !self.state.get() {
-            self.state.set(true);
+        if self.state.get() == ButtonState::Idle {
+            self.state.set(ButtonState::PressedLock);
             self.long.set(false);
+            self.timer.init(50 * (8_000_000 / 1000));
             self.timer.reset();
             self.timer.go();
         }
     }
 
     fn release(&self) -> ButtonResult {
-        if self.state.get() {
+        if self.state.get() == ButtonState::PressedUnlock {
             self.timer.stop();
-            self.state.set(false);
+            self.state.set(ButtonState::Idle);
             if self.long.get() { ButtonResult::LongPress }
             else { ButtonResult::ShortPress }
         } else { ButtonResult::FalseAlarm }
@@ -240,7 +246,19 @@ impl<'a> Button<'a> {
 
     fn timeout(&self) {
         self.timer.stop();
-        self.long.set(true);
+        self.state.set(match self.state.get() {
+            ButtonState::PressedLock => {
+                self.timer.init(500 * (8_000_000 / 1000));
+                self.timer.reset();
+                self.timer.go();
+                ButtonState::PressedUnlock
+            },
+            ButtonState::PressedUnlock => {
+                self.long.set(true);
+                ButtonState::PressedUnlock
+            },
+            s => s
+        });
     }
 }
 
@@ -875,8 +893,15 @@ fn tim2_handler() {
     let gs = get_gs();
     let p = gs.perip.as_ref().unwrap();
     p.TIM2.sr.modify(|_, w| w.uif().clear());
-    //gs.btn1.as_ref().unwrap().timeout();
+    gs.btn1.as_ref().unwrap().timeout();
     gs.btn2.as_ref().unwrap().timeout();
+}
+
+fn tim5_handler() {
+    let gs = get_gs();
+    let p = gs.perip.as_ref().unwrap();
+    p.TIM5.sr.modify(|_, w| w.uif().clear());
+    gs.btn1.as_ref().unwrap().timeout();
 }
 
 fn tim4_handler() { GlobalState::tim4_callback(); }
@@ -888,6 +913,7 @@ interrupt!(EXTI3, exti3_handler);
 interrupt!(TIM2, tim2_handler);
 interrupt!(TIM4, tim4_handler);
 interrupt!(TIM3, tim3_handler);
+interrupt!(TIM5, tim5_handler);
 
 const SYNC_PERIOD: u8 = 10;
 const BLINK_PERIOD: u32 = 500;
@@ -944,12 +970,13 @@ fn init() {
     /* enable GPIOA, GPIOB and AFIO */
     p.RCC.apb2enr.modify(|_, w| w.iopaen().enabled()
                                 .iopben().enabled()
-                                .afioen().enabled()
-                                .tim1en().enabled());
+                                .afioen().enabled());
 
     p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled()
                                  .tim4en().enabled()
-                                 .tim3en().enabled());
+                                 .tim3en().enabled()
+                                 .tim5en().enabled()
+                                 );
 
     /* GPIO */
     /* enable PA0-2 for manipulating shift register */
@@ -981,6 +1008,7 @@ fn init() {
     p.NVIC.enable(Interrupt::TIM2);
     p.NVIC.enable(Interrupt::TIM4);
     p.NVIC.enable(Interrupt::TIM3);
+    p.NVIC.enable(Interrupt::TIM5);
     p.EXTI.imr.write(|w| w.mr3().set_bit()
                           .mr4().set_bit());
     p.EXTI.rtsr.write(|w| w.tr3().set_bit()
@@ -996,8 +1024,8 @@ fn init() {
     gs.disp.as_ref().unwrap().output_bits(0);
     gs.i2c_inited = true;
 
-    gs.btn1 = Some(Button::new(tim::Timer(p.TIM5), 300));
-    gs.btn2 = Some(Button::new(tim::Timer(p.TIM2), 300));
+    gs.btn1 = Some(Button::new(tim::Timer(p.TIM2)));
+    gs.btn2 = Some(Button::new(tim::Timer(p.TIM2)));
     tim::Timer(p.TIM4).init(BLINK_PERIOD * (8_000_000 / 1000));
     tim::Timer(p.TIM3).init(10 * (8_000_000 / 1000));
     gs.update_clock();

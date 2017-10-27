@@ -5,6 +5,7 @@ pub struct Timer<'a> (pub &'a tim2::RegisterBlock);
 impl<'a> Timer<'a> {
     pub fn init(&self, timeout: u32) {
         let tim = self.0;
+        tim.dier.modify(|_, w| w.uie().clear_bit());
         self.set_timeout(timeout);
         tim.cr1.write(|w| w.opm().continuous());
         /* UEV to reload the psc and arr (without an interrupt) */
