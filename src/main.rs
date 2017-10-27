@@ -897,13 +897,6 @@ fn tim2_handler() {
     gs.btn2.as_ref().unwrap().timeout();
 }
 
-fn tim5_handler() {
-    let gs = get_gs();
-    let p = gs.perip.as_ref().unwrap();
-    p.TIM5.sr.modify(|_, w| w.uif().clear());
-    gs.btn1.as_ref().unwrap().timeout();
-}
-
 fn tim4_handler() { GlobalState::tim4_callback(); }
 fn tim3_handler() { GlobalState::tim3_callback(); }
 
@@ -913,7 +906,6 @@ interrupt!(EXTI3, exti3_handler);
 interrupt!(TIM2, tim2_handler);
 interrupt!(TIM4, tim4_handler);
 interrupt!(TIM3, tim3_handler);
-interrupt!(TIM5, tim5_handler);
 
 const SYNC_PERIOD: u8 = 10;
 const BLINK_PERIOD: u32 = 500;
@@ -974,9 +966,7 @@ fn init() {
 
     p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled()
                                  .tim4en().enabled()
-                                 .tim3en().enabled()
-                                 .tim5en().enabled()
-                                 );
+                                 .tim3en().enabled());
 
     /* GPIO */
     /* enable PA0-2 for manipulating shift register */
@@ -1008,7 +998,6 @@ fn init() {
     p.NVIC.enable(Interrupt::TIM2);
     p.NVIC.enable(Interrupt::TIM4);
     p.NVIC.enable(Interrupt::TIM3);
-    p.NVIC.enable(Interrupt::TIM5);
     p.EXTI.imr.write(|w| w.mr3().set_bit()
                           .mr4().set_bit());
     p.EXTI.rtsr.write(|w| w.tr3().set_bit()
