@@ -46,6 +46,7 @@ struct GlobalState {
     perip: Option<Peripherals<'static>>,
     disp: Option<ShiftRegister<'static>>,
     btn1: Option<Button<'static>>,
+    btn2: Option<Button<'static>>,
     i2c: Option<i2c::I2C<'static>>,
     i2c_inited: bool,
     sync_cnt: Cell<u8>,
@@ -54,7 +55,7 @@ struct GlobalState {
     blinky: RefCell<[bool; 6]>,
     blink_state: Cell<bool>,
     pidx: usize,
-    panels: [&'static Panel; 4],
+    panels: [&'static Panel; 5],
 }
 
 struct Button<'a> {
@@ -149,6 +150,20 @@ struct CountdownPanel<'a> {
     presets: RefCell<[[u8; 6]; 2]>,
     counter: Cell<u32>,
     didx: Cell<u8>,
+    gs: &'a GlobalState,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum CountupPanelState {
+    Inactive,
+    View,
+    OnGoing,
+    OnGoingPaused
+}
+
+struct CountupPanel<'a> {
+    state: Cell<CountupPanelState>,
+    counter: Cell<u32>,
     gs: &'a GlobalState,
 }
 
@@ -498,11 +513,24 @@ impl<'a> Panel for CountdownPanel<'a> {
         true
     }
 
+    fn btn2_long(&self) -> bool {
+        use CountdownPanelState::*;
+        self.state.set(match self.state.get() {
+            OnGoing => OnGoing,
+            OnGoingPaused => OnGoingPaused,
+            TimeUp => TimeUp,
+            _ => {
+                self.go();
+                OnGoing
+            },
+        });
+        self.update_output();
+        true
+    }
+
     fn btn2_short(&self) -> bool {
         use CountdownPanelState::*;
-        let tim = self.gs.perip.as_ref().unwrap().TIM3;
-        let timer = tim::Timer(tim);
-        let s = match self.state.get() {
+        self.state.set(match self.state.get() {
             View => EditWhole,
             EditWhole => Edit3,
             Edit3 => Edit2,
@@ -511,21 +539,12 @@ impl<'a> Panel for CountdownPanel<'a> {
             Edit0 => Edit2m,
             Edit2m => Edit1m,
             Edit1m => {
-                let p = &self.presets.borrow()[self.didx.get() as usize];
-                let mut x: u32 = 0;
-                for v in p.iter().rev() {
-                    x *= 10;
-                    x += *v as u32;
-                }
-                self.counter.set(x);
-                timer.reset();
-                timer.go();
+                self.go();
                 OnGoing
             },
             OnGoingPaused => View,
             s => s
-        };
-        self.state.set(s);
+        });
         self.update_output();
         true
     }
@@ -556,7 +575,25 @@ impl<'a> Panel for CountdownPanel<'a> {
 }
 
 impl<'a> CountdownPanel<'a> {
+    fn go(&self) {
+        use CountdownPanelState::*;
+        let tim = self.gs.perip.as_ref().unwrap().TIM3;
+        let timer = tim::Timer(tim);
+        let p = &self.presets.borrow()[self.didx.get() as usize];
+        let mut x: u32 = 0;
+        for v in p.iter().rev() {
+            x *= 10;
+            x += *v as u32;
+        }
+        self.counter.set(x);
+        timer.reset();
+        timer.go();
+    }
+
     fn update_clock(&self) {
+        if self.state.get() == CountdownPanelState::Inactive {
+            return
+        }
         let x = self.counter.get();
         if x == 0 {
             let tim = self.gs.perip.as_ref().unwrap().TIM3;
@@ -566,6 +603,70 @@ impl<'a> CountdownPanel<'a> {
         } else {
             self.counter.set(x - 1);
         }
+        self.update_output();
+    }
+}
+
+impl<'a> Panel for CountupPanel<'a> {
+    fn btn1_short(&self) -> bool {
+        use CountupPanelState::*;
+        let tim = self.gs.perip.as_ref().unwrap().TIM3;
+        let timer = tim::Timer(tim);
+        match self.state.get() {
+            View => {
+                self.state.set(Inactive);
+                return false;
+            },
+            OnGoing => {
+                timer.stop();
+                self.state.set(OnGoingPaused);
+            },
+            OnGoingPaused => {
+                timer.go();
+                self.state.set(OnGoing);
+            },
+            Inactive => self.state.set(View)
+        }
+        self.update_output();
+        true
+    }
+
+    fn btn2_short(&self) -> bool {
+        use CountupPanelState::*;
+        let tim = self.gs.perip.as_ref().unwrap().TIM3;
+        let timer = tim::Timer(tim);
+        self.state.set(match self.state.get() {
+            View => {
+                self.counter.set(0);
+                timer.reset();
+                timer.go();
+                OnGoing
+            },
+            OnGoingPaused => View,
+            s => s
+        });
+        self.update_output();
+        true
+    }
+
+    fn update_output(&self) {
+        use CountupPanelState::*;
+        self.gs.update_blinky(match self.state.get() {
+            View => 0b111111,
+            _ => 0x0
+        });
+        self.gs.render1(self.counter.get());
+        self.gs.display();
+    }
+}
+
+impl<'a> CountupPanel<'a> {
+    fn update_clock(&self) {
+        if self.state.get() == CountupPanelState::Inactive {
+            return
+        }
+        let x = self.counter.get() + 1;
+        self.counter.set(if x > 999999 {0} else {x});
         self.update_output();
     }
 }
@@ -707,6 +808,7 @@ impl GlobalState {
         }
         unsafe {
             CD_PANEL.update_clock();
+            CU_PANEL.update_clock();
         }
     }
 }
@@ -744,7 +846,26 @@ fn exti3_handler() {
                     gs.panels[gs.pidx].btn1_short();
                 }
             },
-            ButtonResult::LongPress => { gs.panels[gs.pidx].btn2_short(); }
+            ButtonResult::LongPress => { }
+        }
+        gs.display();
+    }
+}
+
+fn exti4_handler() {
+    let gs = get_gs();
+    let btn2 = gs.btn2.as_ref().unwrap();
+    let p = gs.perip.as_ref().unwrap();
+    p.EXTI.pr.write(|w| w.pr4().set_bit());
+    let x = p.GPIOA.idr.read().idr4().bit();
+    if !x {
+        btn2.press();
+    } else {
+        let gs = get_gs();
+        match btn2.release() {
+            ButtonResult::FalseAlarm => (),
+            ButtonResult::ShortPress => {gs.panels[gs.pidx].btn2_short();},
+            ButtonResult::LongPress => {gs.panels[gs.pidx].btn2_long();}
         }
         gs.display();
     }
@@ -754,13 +875,15 @@ fn tim2_handler() {
     let gs = get_gs();
     let p = gs.perip.as_ref().unwrap();
     p.TIM2.sr.modify(|_, w| w.uif().clear());
-    gs.btn1.as_ref().unwrap().timeout();
+    //gs.btn1.as_ref().unwrap().timeout();
+    gs.btn2.as_ref().unwrap().timeout();
 }
 
 fn tim4_handler() { GlobalState::tim4_callback(); }
 fn tim3_handler() { GlobalState::tim3_callback(); }
 
 exception!(SYS_TICK, systick_handler);
+interrupt!(EXTI4, exti4_handler);
 interrupt!(EXTI3, exti3_handler);
 interrupt!(TIM2, tim2_handler);
 interrupt!(TIM4, tim4_handler);
@@ -786,11 +909,15 @@ static mut CD_PANEL: CountdownPanel = CountdownPanel{state: Cell::new(CountdownP
                                         counter: Cell::new(0),
                                         didx: Cell::new(0),
                                         gs: unsafe{&GS}};
+static mut CU_PANEL: CountupPanel = CountupPanel{state: Cell::new(CountupPanelState::Inactive),
+                                        counter: Cell::new(0),
+                                        gs: unsafe{&GS}};
 
 static mut GS: GlobalState =
     GlobalState{perip: None,
                 disp: None,
                 btn1: None,
+                btn2: None,
                 i2c: None,
                 i2c_inited: false,
                 sync_cnt: Cell::new(0),
@@ -799,7 +926,7 @@ static mut GS: GlobalState =
                 blinky: RefCell::new([false; 6]),
                 blink_state: Cell::new(false),
                 pidx: 0,
-                panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL, &CD_PANEL]}
+                panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL, &CD_PANEL, &CU_PANEL]}
     };
 
 fn init() {
@@ -817,19 +944,23 @@ fn init() {
     /* enable GPIOA, GPIOB and AFIO */
     p.RCC.apb2enr.modify(|_, w| w.iopaen().enabled()
                                 .iopben().enabled()
-                                .afioen().enabled());
+                                .afioen().enabled()
+                                .tim1en().enabled());
+
     p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled()
                                  .tim4en().enabled()
                                  .tim3en().enabled());
 
     /* GPIO */
     /* enable PA0-2 for manipulating shift register */
-    p.GPIOA.odr.modify(|_, w| w.odr3().set_bit());
+    p.GPIOA.odr.modify(|_, w| w.odr3().set_bit()
+                               .odr4().set_bit());
     p.GPIOA.crl.modify(|_, w|
         w.mode0().output().cnf0().push()
          .mode1().output().cnf1().push()
          .mode2().output().cnf2().push()
-         .mode3().input().cnf3().bits(0b10));
+         .mode3().input().cnf3().bits(0b10)
+         .mode4().input().cnf4().bits(0b10));
 
     /* enable PB6 and PB7 for I2C1 */
     p.GPIOB.crl.modify(|_, w|
@@ -844,13 +975,18 @@ fn init() {
 
     /* NVIC & EXTI */
     p.AFIO.exticr1.write(|w| unsafe { w.exti3().bits(0b0000) });
+    p.AFIO.exticr2.write(|w| unsafe { w.exti4().bits(0b0000) });
     p.NVIC.enable(Interrupt::EXTI3);
+    p.NVIC.enable(Interrupt::EXTI4);
     p.NVIC.enable(Interrupt::TIM2);
     p.NVIC.enable(Interrupt::TIM4);
     p.NVIC.enable(Interrupt::TIM3);
-    p.EXTI.imr.write(|w| w.mr3().set_bit());
-    p.EXTI.rtsr.write(|w| w.tr3().set_bit());
-    p.EXTI.ftsr.write(|w| w.tr3().set_bit());
+    p.EXTI.imr.write(|w| w.mr3().set_bit()
+                          .mr4().set_bit());
+    p.EXTI.rtsr.write(|w| w.tr3().set_bit()
+                           .tr4().set_bit());
+    p.EXTI.ftsr.write(|w| w.tr3().set_bit()
+                           .tr4().set_bit());
 
 
     gs.i2c = Some(i2c::I2C(p.I2C1));
@@ -860,7 +996,8 @@ fn init() {
     gs.disp.as_ref().unwrap().output_bits(0);
     gs.i2c_inited = true;
 
-    gs.btn1 = Some(Button::new(tim::Timer(p.TIM2), 300));
+    gs.btn1 = Some(Button::new(tim::Timer(p.TIM5), 300));
+    gs.btn2 = Some(Button::new(tim::Timer(p.TIM2), 300));
     tim::Timer(p.TIM4).init(BLINK_PERIOD * (8_000_000 / 1000));
     tim::Timer(p.TIM3).init(10 * (8_000_000 / 1000));
     gs.update_clock();
