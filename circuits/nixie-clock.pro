@@ -1,4 +1,4 @@
-update=Sun 01 Oct 2017 07:18:12 PM EDT
+update=Sat 28 Oct 2017 01:01:38 PM EDT
 version=1
 last_client=kicad
 [pcbnew]
@@ -64,3 +64,13 @@ LibName32=valves
 LibName33=stm32
 LibName34=ttl_ieee
 LibName35=maxim
+[schematic_editor]
+version=1
+PageLayoutDescrFile=
+PlotDirectoryName=
+SubpartIdSeparator=0
+SubpartFirstId=65
+NetFmtName=
+SpiceForceRefPrefix=0
+SpiceUseNetNumbers=0
+LabSize=60
