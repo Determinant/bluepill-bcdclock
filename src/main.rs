@@ -6,7 +6,7 @@
 extern crate cortex_m;
 
 use stm32f103xx::{Interrupt, Peripherals, gpioa};
-use core::cell::{Cell, RefCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 
 mod mutex;
 mod i2c;
@@ -42,33 +42,37 @@ struct Time {
     hr: u8,
 }
 
-struct GlobalState {
-    perip: Option<Peripherals<'static>>,
-    disp: Option<ShiftRegister<'static>>,
-    btn1: Option<Button<'static>>,
-    btn2: Option<Button<'static>>,
-    i2c: Option<i2c::I2C<'static>>,
+struct GlobalState<'a> {
+    perip: Option<Peripherals<'a>>,
+    disp: Option<ShiftRegister<'a>>,
+    btn1: Option<Button<'a>>,
+    btn2: Option<Button<'a>>,
+    events: Option<AlarmEventManager<'a>>,
+    i2c: Option<i2c::I2C<'a>>,
     i2c_inited: bool,
     sync_cnt: Cell<u8>,
     buff: RefCell<[u8; 6]>,
     disp_on: bool,
     blinky: RefCell<[bool; 6]>,
     blink_state: Cell<bool>,
+    blinky_enabled: Cell<Option<u8>>,
     pidx: usize,
-    panels: [&'static Panel; 5],
+    panels: [&'a Panel; 5],
 }
 
 #[derive(PartialEq, Clone, Copy)]
 enum ButtonState {
     Idle,
     PressedLock,
-    PressedUnlock
+    PressedUnlock,
+    ReleaseLock
 }
 
 struct Button<'a> {
     state: Cell<ButtonState>,
     long: Cell<bool>,
-    timer: tim::Timer<'a>
+    events: &'a AlarmEventManager<'a>,
+    ev_id: Cell<u8>
 }
 
 enum ButtonResult {
@@ -85,6 +89,10 @@ trait Panel {
     fn update_output(&self);
 }
 
+trait Timeoutable<'a> {
+    fn timeout(&'a self);
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum TimePanelState {
     Inactive,
@@ -95,7 +103,7 @@ enum TimePanelState {
 }
 
 struct TimePanel<'a> {
-    gs: &'a GlobalState,
+    gs: &'a GlobalState<'a>,
     state: Cell<TimePanelState>, 
     time: RefCell<Time>,
     tmp: RefCell<Time>
@@ -118,7 +126,7 @@ enum DatePanelState {
 }
 
 struct DatePanel<'a> {
-    gs: &'a GlobalState,
+    gs: &'a GlobalState<'a>,
     state: Cell<DatePanelState>,
     date: RefCell<Date>,
     tmp: RefCell<Date>
@@ -133,7 +141,7 @@ enum TempPanelState {
 struct TempPanel<'a> {
     state: Cell<TempPanelState>,
     temp: Cell<ds3231::Temp>,
-    gs: &'a GlobalState,
+    gs: &'a GlobalState<'a>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -157,7 +165,7 @@ struct CountdownPanel<'a> {
     presets: RefCell<[[u8; 6]; 2]>,
     counter: Cell<u32>,
     didx: Cell<u8>,
-    gs: &'a GlobalState,
+    gs: &'a GlobalState<'a>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -171,7 +179,18 @@ enum CountupPanelState {
 struct CountupPanel<'a> {
     state: Cell<CountupPanelState>,
     counter: Cell<u32>,
-    gs: &'a GlobalState,
+    gs: &'a GlobalState<'a>,
+}
+
+#[derive(Clone, Copy)]
+struct AlarmEvent<'a> {
+    cb: &'a Timeoutable<'a>,
+    cnt: u32,
+    free: bool
+}
+
+struct AlarmEventManager<'a> {
+    events: UnsafeCell<[AlarmEvent<'a>; 8]>
 }
 
 impl<'a> ShiftRegister<'a> {
@@ -218,47 +237,49 @@ impl Time {
     }
 }
 
-impl<'a> Button<'a> {
-    fn new(timer: tim::Timer<'a>) -> Self {
-        Button {state: Cell::new(ButtonState::Idle),
-                long: Cell::new(false),
-                timer}
-    }
-
-    fn press(&self) {
-        if self.state.get() == ButtonState::Idle {
-            self.state.set(ButtonState::PressedLock);
-            self.long.set(false);
-            self.timer.init(50 * (8_000_000 / 1000));
-            self.timer.reset();
-            self.timer.go();
-        }
-    }
-
-    fn release(&self) -> ButtonResult {
-        if self.state.get() == ButtonState::PressedUnlock {
-            self.timer.stop();
-            self.state.set(ButtonState::Idle);
-            if self.long.get() { ButtonResult::LongPress }
-            else { ButtonResult::ShortPress }
-        } else { ButtonResult::FalseAlarm }
-    }
-
-    fn timeout(&self) {
-        self.timer.stop();
+impl<'a> Timeoutable<'a> for Button<'a> {
+    fn timeout(&'a self) {
         self.state.set(match self.state.get() {
             ButtonState::PressedLock => {
-                self.timer.init(500 * (8_000_000 / 1000));
-                self.timer.reset();
-                self.timer.go();
+                self.ev_id.set(self.events.add(self, 500));
                 ButtonState::PressedUnlock
             },
             ButtonState::PressedUnlock => {
                 self.long.set(true);
                 ButtonState::PressedUnlock
             },
+            ButtonState::ReleaseLock => {
+                ButtonState::Idle
+            },
             s => s
         });
+    }
+}
+
+impl<'a> Button<'a> {
+    fn new(events: &'a AlarmEventManager<'a>) -> Self {
+        Button {state: Cell::new(ButtonState::Idle),
+                long: Cell::new(false),
+                ev_id: Cell::new(0),
+                events}
+    }
+
+    fn press(&'a self) {
+        if self.state.get() == ButtonState::Idle {
+            self.state.set(ButtonState::PressedLock);
+            self.long.set(false);
+            self.ev_id.set(self.events.add(self, 50));
+        }
+    }
+
+    fn release(&'a self) -> ButtonResult {
+        if self.state.get() == ButtonState::PressedUnlock {
+            self.events.drop(self.ev_id.get());
+            self.state.set(ButtonState::ReleaseLock);
+            self.ev_id.set(self.events.add(self, 50));
+            if self.long.get() { ButtonResult::LongPress }
+            else { ButtonResult::ShortPress }
+        } else { ButtonResult::FalseAlarm }
     }
 }
 
@@ -298,15 +319,7 @@ impl<'a> Panel for TimePanel<'a> {
             EditSec => {
                 let tmp = self.tmp.borrow();
                 ds3231::DS3231(self.gs.i2c.as_ref().unwrap())
-                                .write_time(&ds3231::Date{second: tmp.sec,
-                                                         minute: tmp.min,
-                                                         hour: tmp.hr,
-                                                         day: 0,
-                                                         date: 0,
-                                                         month: 0,
-                                                         year: 0,
-                                                         am: false,
-                                                         am_enabled: false});
+                                .write_time(tmp.hr, tmp.min, tmp.sec);
                 *self.time.borrow_mut() = *tmp;
                 View
             },
@@ -387,15 +400,7 @@ impl<'a> Panel for DatePanel<'a> {
             EditDay => {
                 let tmp = self.tmp.borrow();
                 ds3231::DS3231(self.gs.i2c.as_ref().unwrap())
-                                .write_date(&ds3231::Date{second: 0,
-                                                         minute: 0,
-                                                         hour: 0,
-                                                         day: 0,
-                                                         date: tmp.day,
-                                                         month: tmp.mon,
-                                                         year: tmp.yr,
-                                                         am: false,
-                                                         am_enabled: false});
+                                .write_date(tmp.yr, tmp.mon, tmp.day);
                 *self.date.borrow_mut() = *tmp;
                 View
             },
@@ -594,7 +599,6 @@ impl<'a> Panel for CountdownPanel<'a> {
 
 impl<'a> CountdownPanel<'a> {
     fn go(&self) {
-        use CountdownPanelState::*;
         let tim = self.gs.perip.as_ref().unwrap().TIM3;
         let timer = tim::Timer(tim);
         let p = &self.presets.borrow()[self.didx.get() as usize];
@@ -689,7 +693,50 @@ impl<'a> CountupPanel<'a> {
     }
 }
 
-impl GlobalState {
+impl<'a> AlarmEventManager<'a> {
+    fn new() -> Self {
+        unsafe {
+            AlarmEventManager{events: UnsafeCell::new([AlarmEvent{cb: core::mem::uninitialized(),
+                                                                  cnt: 0,
+                                                                  free: true}; 8]) }
+        }
+    }
+
+    fn add(&self, f: &'a Timeoutable<'a>, timeout: u32) -> u8 {
+        unsafe {
+            for (i, v) in (*self.events.get()).iter_mut().enumerate() {
+                if v.free {
+                    v.cb = f;
+                    v.cnt = timeout;
+                    v.free = false;
+                    return i as u8;
+                }
+            }
+            panic!("event manager full");
+        }
+    }
+
+    fn drop(&self, id: u8) {
+        unsafe {
+            (*self.events.get())[id as usize].free = true;
+        }
+    }
+
+    fn tick(&self) {
+        unsafe {
+            for v in &mut *self.events.get() {
+                if v.free {continue;}
+                v.cnt -= 1;
+                if v.cnt == 0 {
+                    v.cb.timeout();
+                    v.free = true;
+                }
+            }
+        }
+    }
+}
+
+impl<'a> GlobalState<'a> {
 
     fn render(&self, nbuff: &[u8; 6]) {
         self.buff.borrow_mut().copy_from_slice(nbuff);
@@ -723,21 +770,24 @@ impl GlobalState {
         self.disp.as_ref().unwrap().output_bits(digits2bcds(&buff[..]));
     }
 
-    fn update_blinky(&self, nb: u8) {
-        let tim4 = self.perip.as_ref().unwrap().TIM4;
-        let timer = tim::Timer(tim4);
-        let en = timer.is_enabled();
+    fn update_blinky(&'a self, nb: u8) {
         let flag = nb == 0; /* if nothing is blinking */
+        let en = self.blinky_enabled.get();
         for (i, v) in self.blinky.borrow_mut().iter_mut().enumerate() {
             *v = ((nb >> i) & 1) == 1;
         }
-        if en && flag {
-            self.blink_state.set(false);
-            timer.stop();
-        } else if !en && !flag {
-            self.blink_state.set(false);
-            timer.reset();
-            timer.go();
+        let ev = self.events.as_ref().unwrap();
+        if flag {
+            if let Some(ev_id) = en {
+                self.blink_state.set(false);
+                self.blinky_enabled.set(None);
+                ev.drop(ev_id);
+            }
+        } else {
+            if en.is_none() {
+                self.blink_state.set(false);
+                self.blinky_enabled.set(Some(ev.add(self, BLINK_PERIOD)));
+            }
         }
     }
     
@@ -779,33 +829,7 @@ impl GlobalState {
             TEMP_PANEL.update_clock(temp);
         }
     }
-        /*
-        let rtc = ds3231::DS3231(self.i2c.as_ref().unwrap());
-        rtc.write_fulldate(&ds3231::Date{second: 30,
-                                minute: 23,
-                                hour: 18,
-                                day: 2,
-                                date: 10,
-                                month: 10,
-                                year: 17,
-                                am: false,
-                                am_enabled: false});
-        */
-        /*
-        let rom = ROM.as_ref().unwrap();
-        let mut buf: [u8; 64] = [23; 64];
-        rom.write(23, 64, &buf);
-        let mut buf2: [u8; 80] = [0; 80];
-        rom.read(20, 80, &mut buf2);
-        */
-        /*
-        let x = mutex::Mutex::new(42);
-        {
-            let y = x.lock();
-            let z = *y + 1;
-            let w = z;
-        }
-        */
+
     #[inline(always)]
     fn tim4_callback() {
         let gs = get_gs();
@@ -813,8 +837,10 @@ impl GlobalState {
             let p = gs.perip.as_ref().unwrap();
             p.TIM4.sr.modify(|_, w| w.uif().clear());
         }
-        gs.blink_state.set(!gs.blink_state.get());
-        gs.display();
+        match gs.events.as_ref() {
+            Some(ev) => ev.tick(),
+            None => ()
+        }
     }
 
     #[inline(always)]
@@ -831,8 +857,19 @@ impl GlobalState {
     }
 }
 
+impl<'a> Timeoutable<'a> for GlobalState<'a> {
+    fn timeout(&'a self) {
+        let ev = self.events.as_ref().unwrap();
+        self.blink_state.set(!self.blink_state.get());
+        self.display();
+        if self.blinky_enabled.get().is_some() {
+            self.blinky_enabled.set(Some(ev.add(self, BLINK_PERIOD)));
+        }
+    }
+}
+
 #[inline(always)]
-fn get_gs() -> &'static mut GlobalState {
+fn get_gs() -> &'static mut GlobalState<'static> {
     unsafe {&mut GS}
 }
 
@@ -889,23 +926,11 @@ fn exti4_handler() {
     }
 }
 
-fn tim2_handler() {
-    let gs = get_gs();
-    let p = gs.perip.as_ref().unwrap();
-    p.TIM2.sr.modify(|_, w| w.uif().clear());
-    gs.btn1.as_ref().unwrap().timeout();
-    gs.btn2.as_ref().unwrap().timeout();
-}
-
-fn tim4_handler() { GlobalState::tim4_callback(); }
-fn tim3_handler() { GlobalState::tim3_callback(); }
-
 exception!(SYS_TICK, systick_handler);
 interrupt!(EXTI4, exti4_handler);
 interrupt!(EXTI3, exti3_handler);
-interrupt!(TIM2, tim2_handler);
-interrupt!(TIM4, tim4_handler);
-interrupt!(TIM3, tim3_handler);
+interrupt!(TIM4, GlobalState::tim4_callback);
+interrupt!(TIM3, GlobalState::tim3_callback);
 
 const SYNC_PERIOD: u8 = 10;
 const BLINK_PERIOD: u32 = 500;
@@ -936,6 +961,7 @@ static mut GS: GlobalState =
                 disp: None,
                 btn1: None,
                 btn2: None,
+                events: None,
                 i2c: None,
                 i2c_inited: false,
                 sync_cnt: Cell::new(0),
@@ -943,6 +969,7 @@ static mut GS: GlobalState =
                 disp_on: true,
                 blinky: RefCell::new([false; 6]),
                 blink_state: Cell::new(false),
+                blinky_enabled: Cell::new(None),
                 pidx: 0,
                 panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL, &CD_PANEL, &CU_PANEL]}
     };
@@ -964,8 +991,7 @@ fn init() {
                                 .iopben().enabled()
                                 .afioen().enabled());
 
-    p.RCC.apb1enr.modify(|_, w| w.tim2en().enabled()
-                                 .tim4en().enabled()
+    p.RCC.apb1enr.modify(|_, w| w.tim4en().enabled()
                                  .tim3en().enabled());
 
     /* GPIO */
@@ -995,9 +1021,8 @@ fn init() {
     p.AFIO.exticr2.write(|w| unsafe { w.exti4().bits(0b0000) });
     p.NVIC.enable(Interrupt::EXTI3);
     p.NVIC.enable(Interrupt::EXTI4);
-    p.NVIC.enable(Interrupt::TIM2);
-    p.NVIC.enable(Interrupt::TIM4);
     p.NVIC.enable(Interrupt::TIM3);
+    p.NVIC.enable(Interrupt::TIM4);
     p.EXTI.imr.write(|w| w.mr3().set_bit()
                           .mr4().set_bit());
     p.EXTI.rtsr.write(|w| w.tr3().set_bit()
@@ -1013,11 +1038,18 @@ fn init() {
     gs.disp.as_ref().unwrap().output_bits(0);
     gs.i2c_inited = true;
 
-    gs.btn1 = Some(Button::new(tim::Timer(p.TIM2)));
-    gs.btn2 = Some(Button::new(tim::Timer(p.TIM2)));
-    tim::Timer(p.TIM4).init(BLINK_PERIOD * (8_000_000 / 1000));
+    /* 10ms couting clock */
     tim::Timer(p.TIM3).init(10 * (8_000_000 / 1000));
-    gs.update_clock();
+    /* 1ms-precision event clock */
+    let tim4 = tim::Timer(p.TIM4);
+    tim4.init(1 * (8_000_000 / 1000));
+    gs.update_clock(); /* initialize internal time */
+    gs.events = Some(AlarmEventManager::new());
+    let ev = gs.events.as_ref().unwrap();
+    gs.btn1 = Some(Button::new(ev));
+    gs.btn2 = Some(Button::new(ev));
+    tim4.reset();
+    tim4.go();
 }
 
 fn main() {

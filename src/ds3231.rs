@@ -1,4 +1,4 @@
-use i2c::{I2C, TransDir, DutyType};
+use i2c::{I2C, TransDir};
 
 const DS3231_ADDR: u8 = 0b1101000;
 const DS3231_REG_SEC: u8 = 0x00;
@@ -103,23 +103,17 @@ impl<'a> DS3231<'a> {
         self.write_register(DS3231_REG_SEC, buf.len(), &buf);
     }
 
-    pub fn write_time(&self, date: &Date) {
-        let hour = if date.am_enabled {
-            (1 << 6) | ((if date.am {0} else {1}) << 5) |
-            ((date.hour / 10) << 4) | (date.hour % 10)
-        } else {
-            dec2bcd(date.hour)
-        };
-        let buf: [u8; 3] = [dec2bcd(date.second),
-                            dec2bcd(date.minute),
-                            hour];
+    pub fn write_time(&self, hr: u8, min: u8, sec: u8) {
+        let buf: [u8; 3] = [dec2bcd(sec),
+                            dec2bcd(min),
+                            dec2bcd(hr)];
         self.write_register(DS3231_REG_SEC, buf.len(), &buf);
     }
 
-    pub fn write_date(&self, date: &Date) {
-        let buf: [u8; 3] = [dec2bcd(date.date),
-                            dec2bcd(date.month),
-                            dec2bcd(date.year)];
+    pub fn write_date(&self, yy: u8, mm: u8, dd: u8) {
+        let buf: [u8; 3] = [dec2bcd(dd),
+                            dec2bcd(mm),
+                            dec2bcd(yy)];
         self.write_register(DS3231_REG_DATE, buf.len(), &buf);
     }
 

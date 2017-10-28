@@ -1,4 +1,4 @@
-use stm32f103xx::{tim1, tim2, TIM2};
+use stm32f103xx::{tim1, tim2};
 
 pub struct Timer<'a> (pub &'a tim2::RegisterBlock);
 
