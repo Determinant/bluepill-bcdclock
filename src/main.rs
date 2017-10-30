@@ -31,6 +31,7 @@ fn inc_rotate(n: &mut u8, reset: u8, limit: u8) {
     }
 }
 
+#[inline]
 fn countdown(n: u32) -> u32 {
     if n > 0 { n - 1 } else { n }
 }
@@ -132,7 +133,7 @@ enum TimePanelState {
 
 struct TimePanel<'a> {
     gs: &'a GlobalState<'a>,
-    state: Cell<TimePanelState>, 
+    state: Cell<TimePanelState>,
     time: RefCell<Time>,
     tmp: RefCell<Time>
 }
@@ -293,7 +294,7 @@ impl<'a> Timeoutable<'a> for Button<'a> {
     fn timeout(&'a self) {
         self.state.set(match self.state.get() {
             ButtonState::PressedLock => {
-                self.ev_id.set(self.events.add(self, 500));
+                self.ev_id.set(self.events.add(self, BUTTON_LONGPRESS_THRES));
                 ButtonState::PressedUnlock
             },
             ButtonState::PressedUnlock => {
@@ -320,7 +321,7 @@ impl<'a> Button<'a> {
         if self.state.get() == ButtonState::Idle {
             self.state.set(ButtonState::PressedLock);
             self.long.set(false);
-            self.ev_id.set(self.events.add(self, 50));
+            self.ev_id.set(self.events.add(self, BUTTON_PRESSLOCK_PEROID));
         }
     }
 
@@ -328,7 +329,7 @@ impl<'a> Button<'a> {
         if self.state.get() == ButtonState::PressedUnlock {
             self.events.drop(self.ev_id.get());
             self.state.set(ButtonState::ReleaseLock);
-            self.ev_id.set(self.events.add(self, 50));
+            self.ev_id.set(self.events.add(self, BUTTON_PRESSLOCK_PEROID));
             if self.long.get() { ButtonResult::LongPress }
             else { ButtonResult::ShortPress }
         } else { ButtonResult::FalseAlarm }
@@ -746,7 +747,7 @@ impl<'a> CountupPanel<'a> {
 }
 
 impl<'a> SettingPanel<'a> {
-    fn render_idx(&self, mut d: RefMut<[u8; 6]>) {
+    fn render_idx(&self, d: RefMut<[u8; 6]>) {
         render1(d, match self.idx.get() {
             SettingIdx::TempOnCycle => self.gs.tempon_cycle.get(),
             SettingIdx::TempOnPeroid => self.gs.tempon_peroid.get()
@@ -782,7 +783,7 @@ impl<'a> Panel for SettingPanel<'a> {
                         SettingIdx::TempOnPeroid => SettingIdx::TempOnCycle
                     });
                     self.render_idx(d);
-                }, 
+                },
                 Edit3 => inc_rotate(&mut d[3], 0, 10),
                 Edit2 => inc_rotate(&mut d[2], 0, 10),
                 Edit1 => inc_rotate(&mut d[1], 0, 10),
@@ -889,7 +890,7 @@ impl<'a> GlobalState<'a> {
     fn render(&self, nbuff: &[u8; 6]) {
         self.buff.borrow_mut().copy_from_slice(nbuff);
     }
-    fn render1(&self, mut n: u32) {
+    fn render1(&self, n: u32) {
         render1(self.buff.borrow_mut(), n);
     }
 
@@ -931,7 +932,7 @@ impl<'a> GlobalState<'a> {
             }
         }
     }
-    
+
     fn digits_countup(&self) {
         self.display();
         let mut buff = *self.buff.borrow();
@@ -944,7 +945,7 @@ impl<'a> GlobalState<'a> {
         }
     }
 
- 
+
     fn update_clock(&self) {
         let mut clk = None;
         let mut d = None;
@@ -1107,36 +1108,49 @@ interrupt!(TIM3, GlobalState::tim3_callback);
 
 const SYNC_PERIOD: u8 = 10;
 const BLINK_PERIOD: u32 = 500;
+const BUTTON_PRESSLOCK_PEROID: u32 = 50;
+const BUTTON_LONGPRESS_THRES: u32 = 500;
 
 static mut TIME_PANEL: TimePanel = TimePanel{
-                                        state: Cell::new(TimePanelState::View),
-                                        tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
-                                        time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(TimePanelState::View),
+    tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
+    time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
+    gs: unsafe{&GS}
+};
+
 static mut DATE_PANEL: DatePanel = DatePanel{
-                                        state: Cell::new(DatePanelState::Inactive),
-                                        tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
-                                        date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(DatePanelState::Inactive),
+    tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
+    date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
+    gs: unsafe{&GS}
+};
+
 static mut TEMP_PANEL: TempPanel = TempPanel{
-                                        state: Cell::new(TempPanelState::Inactive),
-                                        temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(TempPanelState::Inactive),
+    temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
+    gs: unsafe{&GS}
+};
+
 static mut CD_PANEL: CountdownPanel = CountdownPanel{
-                                        state: Cell::new(CountdownPanelState::Inactive),
-                                        presets: RefCell::new([[0; 6]; 2]),
-                                        counter: Cell::new(0),
-                                        didx: Cell::new(0),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(CountdownPanelState::Inactive),
+    presets: RefCell::new([[0; 6]; 2]),
+    counter: Cell::new(0),
+    didx: Cell::new(0),
+    gs: unsafe{&GS}
+};
+
 static mut CU_PANEL: CountupPanel = CountupPanel{
-                                        state: Cell::new(CountupPanelState::Inactive),
-                                        counter: Cell::new(0),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(CountupPanelState::Inactive),
+    counter: Cell::new(0),
+    gs: unsafe{&GS}
+};
+
 static mut SET_PANEL: SettingPanel = SettingPanel{
-                                        state: Cell::new(SettingPanelState::Inactive),
-                                        tmp: RefCell::new([9; 6]),
-                                        idx: Cell::new(SettingIdx::TempOnCycle),
-                                        gs: unsafe{&GS}};
+    state: Cell::new(SettingPanelState::Inactive),
+    tmp: RefCell::new([9; 6]),
+    idx: Cell::new(SettingIdx::TempOnCycle),
+    gs: unsafe{&GS}
+};
 
 static mut GS: GlobalState =
     GlobalState{perip: None,
