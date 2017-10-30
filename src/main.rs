@@ -1,6 +1,7 @@
 #![no_std]
 #![feature(asm)]
-#![feature(const_fn)]
+#![feature(const_cell_new)]
+#![feature(const_refcell_new)]
 
 #[macro_use] extern crate stm32f103xx;
 extern crate cortex_m;
@@ -30,6 +31,10 @@ fn inc_rotate(n: &mut u8, reset: u8, limit: u8) {
     }
 }
 
+fn countdown(n: u32) -> u32 {
+    if n > 0 { n - 1 } else { n }
+}
+
 struct ShiftRegister<'a> {
     gpioa: &'a gpioa::RegisterBlock,
     width: u8,
@@ -42,6 +47,13 @@ struct Time {
     hr: u8,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum DispState {
+    On,
+    Off,
+    TempOn
+}
+
 struct GlobalState<'a> {
     perip: Option<Peripherals<'a>>,
     disp: Option<ShiftRegister<'a>>,
@@ -52,7 +64,10 @@ struct GlobalState<'a> {
     i2c_inited: bool,
     sync_cnt: Cell<u8>,
     buff: RefCell<[u8; 6]>,
-    disp_on: bool,
+    disp_state: Cell<DispState>,
+    tempon_cycle: Cell<u16>,
+    tempon_peroid: Cell<u16>,
+    tempon_cnt: Cell<u16>,
     blinky: RefCell<[bool; 6]>,
     blink_state: Cell<bool>,
     blinky_enabled: Cell<Option<u8>>,
@@ -616,14 +631,14 @@ impl<'a> CountdownPanel<'a> {
         if self.state.get() == CountdownPanelState::Inactive {
             return
         }
-        let x = self.counter.get();
+        let x = countdown(self.counter.get());
         if x == 0 {
             let tim = self.gs.perip.as_ref().unwrap().TIM3;
             let timer = tim::Timer(tim);
             timer.stop();
             self.state.set(CountdownPanelState::TimeUp);
         } else {
-            self.counter.set(x - 1);
+            self.counter.set(x);
         }
         self.update_output();
     }
@@ -726,7 +741,7 @@ impl<'a> AlarmEventManager<'a> {
         unsafe {
             for v in &mut *self.events.get() {
                 if v.free {continue;}
-                v.cnt -= 1;
+                v.cnt = countdown(v.cnt);
                 if v.cnt == 0 {
                     v.cb.timeout();
                     v.free = true;
@@ -760,12 +775,12 @@ impl<'a> GlobalState<'a> {
         let mut buff = *self.buff.borrow();
         let b = self.blink_state.get();
         let bs = self.blinky.borrow();
-        if self.disp_on {
-            for (i, v) in buff.iter_mut().enumerate() {
-                if b && bs[i] { *v = 0xf; }
-            }
-        } else {
-            for i in buff.iter_mut() { *i = 0xf; }
+        match self.disp_state.get() {
+            DispState::On | DispState::TempOn =>
+                for (i, v) in buff.iter_mut().enumerate() {
+                    if b && bs[i] { *v = 0xf; }
+                },
+            DispState::Off => for i in buff.iter_mut() { *i = 0xf; }
         }
         self.disp.as_ref().unwrap().output_bits(digits2bcds(&buff[..]));
     }
@@ -822,6 +837,26 @@ impl<'a> GlobalState<'a> {
             temp = Some(rtc.read_temperature());
         } else {
             self.sync_cnt.set(self.sync_cnt.get() - 1);
+        }
+        let tcnt = countdown(self.tempon_cnt.get() as u32) as u16;
+        match self.disp_state.get() {
+            DispState::Off => {
+                if tcnt == 0 {
+                    self.disp_state.set(DispState::TempOn);
+                    self.tempon_cnt.set(self.tempon_peroid.get());
+                } else {
+                    self.tempon_cnt.set(tcnt);
+                }
+            },
+            DispState::TempOn => {
+                if tcnt == 0 {
+                    self.disp_state.set(DispState::Off);
+                    self.tempon_cnt.set(self.tempon_cycle.get());
+                } else {
+                    self.tempon_cnt.set(tcnt);
+                }
+            },
+            _ => ()
         }
         unsafe {
             TIME_PANEL.update_clock(clk);
@@ -893,6 +928,15 @@ fn exti3_handler() {
         match btn1.release() {
             ButtonResult::FalseAlarm => (),
             ButtonResult::ShortPress => {
+                match gs.disp_state.get() {
+                    DispState::Off => {
+                        gs.disp_state.set(DispState::On);
+                        gs.display();
+                        return;
+                    },
+                    DispState::TempOn => gs.disp_state.set(DispState::On),
+                    _ => ()
+                }
                 if !gs.panels[gs.pidx].btn1_short() {
                     gs.pidx += 1;
                     if gs.pidx == gs.panels.len() {
@@ -901,7 +945,10 @@ fn exti3_handler() {
                     gs.panels[gs.pidx].btn1_short();
                 }
             },
-            ButtonResult::LongPress => { }
+            ButtonResult::LongPress => {
+                gs.disp_state.set(DispState::Off);
+                gs.tempon_cnt.set(gs.tempon_cycle.get());
+            }
         }
         gs.display();
     }
@@ -966,7 +1013,10 @@ static mut GS: GlobalState =
                 i2c_inited: false,
                 sync_cnt: Cell::new(0),
                 buff: RefCell::new([0; 6]),
-                disp_on: true,
+                disp_state: Cell::new(DispState::On),
+                tempon_cycle: Cell::new(20),
+                tempon_peroid: Cell::new(5),
+                tempon_cnt: Cell::new(0),
                 blinky: RefCell::new([false; 6]),
                 blink_state: Cell::new(false),
                 blinky_enabled: Cell::new(None),
