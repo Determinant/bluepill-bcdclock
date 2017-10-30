@@ -7,7 +7,7 @@
 extern crate cortex_m;
 
 use stm32f103xx::{Interrupt, Peripherals, gpioa};
-use core::cell::{Cell, RefCell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell, RefMut};
 
 mod mutex;
 mod i2c;
@@ -33,6 +33,19 @@ fn inc_rotate(n: &mut u8, reset: u8, limit: u8) {
 
 fn countdown(n: u32) -> u32 {
     if n > 0 { n - 1 } else { n }
+}
+
+fn render1(mut buff: RefMut<[u8; 6]>, mut n: u32) {
+    for i in 0..buff.len() {
+        buff[i] = (n % 10) as u8;
+        n /= 10;
+    }
+}
+
+fn render3(mut buff: RefMut<[u8; 6]>, n1: u8, n2: u8, n3: u8) {
+    buff[1] = n3 / 10; buff[0] = n3 - buff[1] * 10;
+    buff[3] = n2 / 10; buff[2] = n2 - buff[3] * 10;
+    buff[5] = n1 / 10; buff[4] = n1 - buff[5] * 10;
 }
 
 struct ShiftRegister<'a> {
@@ -72,7 +85,7 @@ struct GlobalState<'a> {
     blink_state: Cell<bool>,
     blinky_enabled: Cell<Option<u8>>,
     pidx: usize,
-    panels: [&'a Panel; 5],
+    panels: [&'a Panel; 6],
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -194,6 +207,30 @@ enum CountupPanelState {
 struct CountupPanel<'a> {
     state: Cell<CountupPanelState>,
     counter: Cell<u32>,
+    gs: &'a GlobalState<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum SettingPanelState {
+    Inactive,
+    View,
+    SettingChoice,
+    Edit3,
+    Edit2,
+    Edit1,
+    Edit0
+}
+
+#[derive(Clone, Copy)]
+enum SettingIdx {
+    TempOnCycle,
+    TempOnPeroid
+}
+
+struct SettingPanel<'a> {
+    state: Cell<SettingPanelState>,
+    tmp: RefCell<[u8; 6]>,
+    idx: Cell<SettingIdx>,
     gs: &'a GlobalState<'a>,
 }
 
@@ -708,6 +745,102 @@ impl<'a> CountupPanel<'a> {
     }
 }
 
+impl<'a> SettingPanel<'a> {
+    fn render_idx(&self, mut d: RefMut<[u8; 6]>) {
+        render1(d, match self.idx.get() {
+            SettingIdx::TempOnCycle => self.gs.tempon_cycle.get(),
+            SettingIdx::TempOnPeroid => self.gs.tempon_peroid.get()
+        } as u32);
+    }
+
+    fn set_idx(&self) {
+        let mut x: u32 = 0;
+        for v in self.tmp.borrow().iter().rev() {
+            x *= 10;
+            x += *v as u32;
+        }
+        match self.idx.get() {
+            SettingIdx::TempOnCycle => self.gs.tempon_cycle.set(x as u16),
+            SettingIdx::TempOnPeroid => self.gs.tempon_peroid.set(x as u16)
+        }
+    }
+}
+
+impl<'a> Panel for SettingPanel<'a> {
+    fn btn1_short(&self) -> bool {
+        use SettingPanelState::*;
+        {
+            let mut d = self.tmp.borrow_mut();
+            match self.state.get() {
+                View => {
+                    self.state.set(Inactive);
+                    return false;
+                },
+                SettingChoice => {
+                    self.idx.set(match self.idx.get() {
+                        SettingIdx::TempOnCycle => SettingIdx::TempOnPeroid,
+                        SettingIdx::TempOnPeroid => SettingIdx::TempOnCycle
+                    });
+                    self.render_idx(d);
+                }, 
+                Edit3 => inc_rotate(&mut d[3], 0, 10),
+                Edit2 => inc_rotate(&mut d[2], 0, 10),
+                Edit1 => inc_rotate(&mut d[1], 0, 10),
+                Edit0 => inc_rotate(&mut d[0], 0, 10),
+                Inactive => {
+                    self.render_idx(d);
+                    self.state.set(View);
+                }
+            }
+        }
+        self.update_output();
+        true
+    }
+
+    fn btn2_short(&self) -> bool {
+        use SettingPanelState::*;
+        self.state.set(match self.state.get() {
+            View => {
+                SettingChoice
+            },
+            SettingChoice => Edit3,
+            Edit3 => Edit2,
+            Edit2 => Edit1,
+            Edit1 => Edit0,
+            Edit0 => { self.set_idx(); View },
+            s => s
+        });
+        self.update_output();
+        true
+    }
+
+    fn btn2_long(&self) -> bool {
+        use SettingPanelState::*;
+        self.state.set(match self.state.get() {
+            View => View,
+            SettingChoice => View,
+            _ => { self.set_idx(); View },
+        });
+        self.update_output();
+        true
+    }
+
+    fn update_output(&self) {
+        use SettingPanelState::*;
+        let s = self.state.get();
+        self.gs.update_blinky(match s {
+            SettingChoice => 0b111111,
+            Edit3 => 0b001000,
+            Edit2 => 0b000100,
+            Edit1 => 0b000010,
+            Edit0 => 0b000001,
+            _ => 0x0
+        });
+        self.gs.render(&*self.tmp.borrow());
+        self.gs.display();
+    }
+}
+
 impl<'a> AlarmEventManager<'a> {
     fn new() -> Self {
         unsafe {
@@ -757,18 +890,11 @@ impl<'a> GlobalState<'a> {
         self.buff.borrow_mut().copy_from_slice(nbuff);
     }
     fn render1(&self, mut n: u32) {
-        let mut buff = self.buff.borrow_mut();
-        for i in 0..buff.len() {
-            buff[i] = (n % 10) as u8;
-            n /= 10;
-        }
+        render1(self.buff.borrow_mut(), n);
     }
 
     fn render3(&self, n1: u8, n2: u8, n3: u8) {
-        let mut buff = self.buff.borrow_mut();
-        buff[1] = n3 / 10; buff[0] = n3 - buff[1] * 10;
-        buff[3] = n2 / 10; buff[2] = n2 - buff[3] * 10;
-        buff[5] = n1 / 10; buff[4] = n1 - buff[5] * 10;
+        render3(self.buff.borrow_mut(), n1, n2, n3);
     }
 
     fn display(&self) {
@@ -982,25 +1108,34 @@ interrupt!(TIM3, GlobalState::tim3_callback);
 const SYNC_PERIOD: u8 = 10;
 const BLINK_PERIOD: u32 = 500;
 
-static mut TIME_PANEL: TimePanel = TimePanel{state: Cell::new(TimePanelState::View),
+static mut TIME_PANEL: TimePanel = TimePanel{
+                                        state: Cell::new(TimePanelState::View),
                                         tmp: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
                                         time: RefCell::new(Time{sec: 0, min: 0, hr: 0}),
                                         gs: unsafe{&GS}};
-static mut DATE_PANEL: DatePanel = DatePanel{state: Cell::new(DatePanelState::Inactive),
+static mut DATE_PANEL: DatePanel = DatePanel{
+                                        state: Cell::new(DatePanelState::Inactive),
                                         tmp: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
                                         date: RefCell::new(Date{yr: 0, mon: 1, day: 1}),
                                         gs: unsafe{&GS}};
-static mut TEMP_PANEL: TempPanel = TempPanel{state: Cell::new(TempPanelState::Inactive),
+static mut TEMP_PANEL: TempPanel = TempPanel{
+                                        state: Cell::new(TempPanelState::Inactive),
                                         temp: Cell::new(ds3231::Temp{cels: 0, quarter: 0}),
                                         gs: unsafe{&GS}};
-
-static mut CD_PANEL: CountdownPanel = CountdownPanel{state: Cell::new(CountdownPanelState::Inactive),
+static mut CD_PANEL: CountdownPanel = CountdownPanel{
+                                        state: Cell::new(CountdownPanelState::Inactive),
                                         presets: RefCell::new([[0; 6]; 2]),
                                         counter: Cell::new(0),
                                         didx: Cell::new(0),
                                         gs: unsafe{&GS}};
-static mut CU_PANEL: CountupPanel = CountupPanel{state: Cell::new(CountupPanelState::Inactive),
+static mut CU_PANEL: CountupPanel = CountupPanel{
+                                        state: Cell::new(CountupPanelState::Inactive),
                                         counter: Cell::new(0),
+                                        gs: unsafe{&GS}};
+static mut SET_PANEL: SettingPanel = SettingPanel{
+                                        state: Cell::new(SettingPanelState::Inactive),
+                                        tmp: RefCell::new([9; 6]),
+                                        idx: Cell::new(SettingIdx::TempOnCycle),
                                         gs: unsafe{&GS}};
 
 static mut GS: GlobalState =
@@ -1021,7 +1156,8 @@ static mut GS: GlobalState =
                 blink_state: Cell::new(false),
                 blinky_enabled: Cell::new(None),
                 pidx: 0,
-                panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL, &CD_PANEL, &CU_PANEL]}
+                panels: unsafe {[&TIME_PANEL, &DATE_PANEL, &TEMP_PANEL,
+                                 &CD_PANEL, &CU_PANEL, &SET_PANEL]}
     };
 
 fn init() {
