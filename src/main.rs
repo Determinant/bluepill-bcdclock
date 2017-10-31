@@ -1174,6 +1174,52 @@ impl<'a> GlobalState<'a> {
             CU_PANEL.update_clock();
         }
     }
+
+
+    #[inline(always)]
+    fn exti3_handler() {
+        let gs = get_gs();
+        let p = gs.perip.as_ref().unwrap();
+        p.EXTI.pr.write(|w| w.pr3().set_bit());
+        let x = p.GPIOA.idr.read().idr3().bit();
+        match gs.disp_state.get() {
+            DispState::Off => {gs.disp_state.set(DispState::On); return},
+            DispState::TempOn => gs.disp_state.set(DispState::On),
+            _ => ()
+        }
+        if !(match x {
+                false => gs.panels[gs.pidx].btn1_press(),
+                true => gs.panels[gs.pidx].btn1_release()})
+        {
+            /* swtich the sub state machine */
+            gs.pidx += 1;
+            if gs.pidx == gs.panels.len() {
+                gs.pidx = 0;
+            }
+            gs.panels[gs.pidx].btn1_short();
+            gs.display();
+        }
+    }
+
+    #[inline(always)]
+    fn exti4_handler() {
+        let gs = get_gs();
+        let btn2 = gs.btn2.as_ref().unwrap();
+        let p = gs.perip.as_ref().unwrap();
+        p.EXTI.pr.write(|w| w.pr4().set_bit());
+        let x = p.GPIOA.idr.read().idr4().bit();
+        if !x {
+            btn2.press(ButtonMode::Release);
+        } else {
+            let gs = get_gs();
+            match btn2.release() {
+                ButtonResult::FalseAlarm => (),
+                ButtonResult::ShortPress => {gs.panels[gs.pidx].btn2_short();},
+                ButtonResult::LongPress => {gs.panels[gs.pidx].btn2_long();}
+            }
+            gs.display();
+        }
+    }
 }
 
 impl<'a> Timeoutable<'a> for GlobalState<'a> {
@@ -1199,52 +1245,9 @@ fn systick_handler() {
     gs.update_clock();
 }
 
-fn exti3_handler() {
-    let gs = get_gs();
-    let p = gs.perip.as_ref().unwrap();
-    p.EXTI.pr.write(|w| w.pr3().set_bit());
-    let x = p.GPIOA.idr.read().idr3().bit();
-    match gs.disp_state.get() {
-        DispState::Off => {gs.disp_state.set(DispState::On); return},
-        DispState::TempOn => gs.disp_state.set(DispState::On),
-        _ => ()
-    }
-    if !(match x {
-            false => gs.panels[gs.pidx].btn1_press(),
-            true => gs.panels[gs.pidx].btn1_release()})
-    {
-        /* swtich the sub state machine */
-        gs.pidx += 1;
-        if gs.pidx == gs.panels.len() {
-            gs.pidx = 0;
-        }
-        gs.panels[gs.pidx].btn1_short();
-        gs.display();
-    }
-}
-
-fn exti4_handler() {
-    let gs = get_gs();
-    let btn2 = gs.btn2.as_ref().unwrap();
-    let p = gs.perip.as_ref().unwrap();
-    p.EXTI.pr.write(|w| w.pr4().set_bit());
-    let x = p.GPIOA.idr.read().idr4().bit();
-    if !x {
-        btn2.press(ButtonMode::Release);
-    } else {
-        let gs = get_gs();
-        match btn2.release() {
-            ButtonResult::FalseAlarm => (),
-            ButtonResult::ShortPress => {gs.panels[gs.pidx].btn2_short();},
-            ButtonResult::LongPress => {gs.panels[gs.pidx].btn2_long();}
-        }
-        gs.display();
-    }
-}
-
 exception!(SYS_TICK, systick_handler);
-interrupt!(EXTI4, exti4_handler);
-interrupt!(EXTI3, exti3_handler);
+interrupt!(EXTI4, GlobalState::exti4_handler);
+interrupt!(EXTI3, GlobalState::exti3_handler);
 interrupt!(TIM4, GlobalState::tim4_callback);
 interrupt!(TIM3, GlobalState::tim3_callback);
 
