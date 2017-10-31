@@ -98,12 +98,19 @@ enum ButtonState {
     Continous
 }
 
+#[derive(Clone, Copy)]
+enum ButtonMode {
+    Release,
+    Immediate,
+    Continous
+}
+
 struct Button<'a> {
     state: Cell<ButtonState>,
     long: Cell<bool>,
     events: &'a AlarmEventManager<'a>,
     ev_id: Cell<u8>,
-    cont: Cell<bool>
+    mode: Cell<ButtonMode>
 }
 
 enum ButtonResult {
@@ -114,7 +121,7 @@ enum ButtonResult {
 
 trait Panel<'a> {
     fn btn1_press(&'a self) -> bool {
-        self.get_gs().btn1.as_ref().unwrap().press(false);
+        self.get_gs().btn1.as_ref().unwrap().press(ButtonMode::Release);
         true
     }
 
@@ -317,28 +324,34 @@ impl Time {
 
 impl<'a> Timeoutable<'a> for Button<'a> {
     fn timeout(&'a self) {
+        use ButtonState::*;
         self.state.set(match self.state.get() {
-            ButtonState::PressedLock => {
-                self.ev_id.set(self.events.add(self, BUTTON_LONGPRESS_THRES));
-                ButtonState::PressedUnlock
+            PressedLock => {
+                match self.mode.get() {
+                    ButtonMode::Immediate => (),
+                    _ => self.ev_id.set(self.events.add(self, BUTTON_LONGPRESS_THRES))
+                }
+                PressedUnlock
             },
-            ButtonState::PressedUnlock => {
-                if self.cont.get() {
-                    self.ev_id.set(self.events.add(self, BUTTON_CONT_CYCLE));
-                    ButtonState::Continous
-                } else {
-                    self.long.set(true);
-                    ButtonState::PressedUnlock
+            PressedUnlock => {
+                match self.mode.get() {
+                    ButtonMode::Continous => {
+                        self.ev_id.set(self.events.add(self, BUTTON_CONT_CYCLE));
+                        Continous
+                    },
+                    ButtonMode::Release => {
+                        self.long.set(true);
+                        PressedUnlock
+                    },
+                    ButtonMode::Immediate => PressedUnlock
                 }
             },
-            ButtonState::ReleaseLock => {
-                ButtonState::Idle
-            },
-            ButtonState::Continous => {
+            ReleaseLock => Idle,
+            Continous => {
                 let gs = get_gs();
                 gs.panels[gs.pidx].btn1_short();
                 self.ev_id.set(self.events.add(self, BUTTON_CONT_CYCLE));
-                ButtonState::Continous
+                Continous
             },
             s => s
         });
@@ -350,13 +363,13 @@ impl<'a> Button<'a> {
         Button {state: Cell::new(ButtonState::Idle),
                 long: Cell::new(false),
                 ev_id: Cell::new(0),
-                cont: Cell::new(false),
+                mode: Cell::new(ButtonMode::Release),
                 events}
     }
 
-    fn press(&'a self, cont: bool) {
-        self.cont.set(cont);
+    fn press(&'a self, mode: ButtonMode) {
         if let ButtonState::Idle = self.state.get() {
+            self.mode.set(mode);
             self.state.set(ButtonState::PressedLock);
             self.long.set(false);
             self.ev_id.set(self.events.add(self, BUTTON_PRESSLOCK_PEROID));
@@ -367,10 +380,14 @@ impl<'a> Button<'a> {
         match self.state.get() {
             ButtonState::PressedUnlock => {
                 let mut r = ButtonResult::ShortPress;
-                if self.long.get() { /* ev_id already dropped */
-                    r = ButtonResult::LongPress;
+                if let ButtonMode::Immediate = self.mode.get() {
+                    r = ButtonResult::FalseAlarm;
                 } else {
-                    self.events.drop(self.ev_id.get());
+                    if self.long.get() { /* ev_id already dropped */
+                        r = ButtonResult::LongPress;
+                    } else {
+                        self.events.drop(self.ev_id.get());
+                    }
                 }
                 self.state.set(ButtonState::ReleaseLock);
                 self.ev_id.set(self.events.add(self, BUTTON_PRESSLOCK_PEROID));
@@ -394,9 +411,9 @@ impl<'a> Panel<'a> for TimePanel<'a> {
             EditHr | EditMin | EditSec => {
                 self.blink_enabled.set(false);
                 self.update_output();
-                true
+                ButtonMode::Continous
             },
-            _ => false
+            _ => ButtonMode::Release
         });
         true
     }
@@ -506,9 +523,9 @@ impl<'a> Panel<'a> for DatePanel<'a> {
             EditYr | EditMon | EditDay => {
                 self.blink_enabled.set(false);
                 self.update_output();
-                true
+                ButtonMode::Continous
             },
-            _ => false
+            _ => ButtonMode::Release
         });
         true
     }
@@ -669,9 +686,13 @@ impl<'a> Panel<'a> for CountdownPanel<'a> {
             Edit3 | Edit2 | Edit1 => {
                 self.blink_enabled.set(false);
                 self.update_output();
-                true
+                ButtonMode::Continous
             },
-            _ => false
+            OnGoing | OnGoingPaused => {
+                self.btn1_short();
+                ButtonMode::Immediate
+            },
+            _ => ButtonMode::Release
         });
         true
     }
@@ -1209,7 +1230,7 @@ fn exti4_handler() {
     p.EXTI.pr.write(|w| w.pr4().set_bit());
     let x = p.GPIOA.idr.read().idr4().bit();
     if !x {
-        btn2.press(false);
+        btn2.press(ButtonMode::Release);
     } else {
         let gs = get_gs();
         match btn2.release() {
