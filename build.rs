@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-pub fn main() {
+fn main() {
     // Put the linker script somewhere the linker can find it
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     File::create(out.join("memory.x"))
@@ -12,6 +12,7 @@ pub fn main() {
         .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
 
-    println!("cargo:rerun-if-changed=build.rs");
+    // Only re-run the build script when memory.x is changed,
+    // instead of when any part of the source code changes.
     println!("cargo:rerun-if-changed=memory.x");
 }

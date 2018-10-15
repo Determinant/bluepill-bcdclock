@@ -43,7 +43,7 @@ impl<'a> I2C<'a> {
                     PLLSRCR::EXTERNAL => {
                         match cfgr.pllxtpre() {
                             PLLXTPRER::DIV2 => (HSE_VALUE >> 1) * pllmull,
-                            PLLXTPRER::DIV1 => HSE_VALUE * pllmull
+                            PLLXTPRER::NODIV => HSE_VALUE * pllmull
                         }
                     }
                 }

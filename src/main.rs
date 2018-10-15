@@ -1,14 +1,17 @@
 #![no_std]
+#![no_main]
 #![feature(asm)]
-#![feature(const_cell_new)]
-#![feature(const_refcell_new)]
 
 #[macro_use] extern crate stm32f103xx;
+#[macro_use] extern crate cortex_m_rt_macros;
 extern crate cortex_m;
+extern crate cortex_m_rt;
+extern crate panic_halt;
 
-use stm32f103xx::{Interrupt, Peripherals, gpioa};
+use stm32f103xx::{Interrupt, Peripherals, CorePeripherals, gpioa};
 use core::cell::{Cell, UnsafeCell};
 use core::mem::uninitialized;
+use cortex_m_rt::entry;
 
 mod mutex;
 mod i2c;
@@ -19,6 +22,12 @@ mod tim;
 #[inline(always)]
 fn get_gs() -> &'static mut GlobalState<'static> {
     unsafe {GS.as_mut().unwrap()}
+}
+
+#[inline(always)]
+#[exception]
+fn SysTick() {
+    GlobalState::systick_handler();
 }
 
 #[inline]
@@ -75,7 +84,8 @@ enum DispState {
 }
 
 struct GlobalState<'a> {
-    perip: Peripherals<'a>,
+    core_perip: CorePeripherals,
+    perip: Peripherals,
     disp: ShiftRegister<'a>,
     btn1: Button<'a>,
     btn2: Button<'a>,
@@ -712,8 +722,7 @@ impl<'a> Panel<'a> for CountdownPanel {
 
     fn btn1_short(&mut self) -> bool {
         use CountdownPanelState::*;
-        let tim = get_gs().perip.TIM3;
-        let timer = tim::Timer(tim);
+        let timer = tim::Timer(&get_gs().perip.TIM3);
         {
             let didx = self.didx.get();
             let presets = &mut self.presets;
@@ -810,8 +819,7 @@ impl<'a> Panel<'a> for CountdownPanel {
 
 impl CountdownPanel {
     fn go(&self) {
-        let tim = get_gs().perip.TIM3;
-        let timer = tim::Timer(tim);
+        let timer = tim::Timer(&get_gs().perip.TIM3);
         let (p0, p1, p2) = self.presets[self.didx.get() as usize];
         let x = (p0 as u32) * 10000 + (p1 as u32) * 100 + (p2 as u32);
         self.counter.set(x);
@@ -825,8 +833,7 @@ impl CountdownPanel {
         }
         let x = countdown(self.counter.get());
         if x == 0 {
-            let tim = get_gs().perip.TIM3;
-            let timer = tim::Timer(tim);
+            let timer = tim::Timer(&get_gs().perip.TIM3);
             timer.stop();
             self.state.set(CountdownPanelState::TimeUp);
         } else {
@@ -839,8 +846,7 @@ impl CountdownPanel {
 impl<'a> Panel<'a> for CountupPanel {
     fn btn1_short(&mut self) -> bool {
         use CountupPanelState::*;
-        let tim = get_gs().perip.TIM3;
-        let timer = tim::Timer(tim);
+        let timer = tim::Timer(&get_gs().perip.TIM3);
         match self.state.get() {
             View => {
                 self.state.set(Inactive);
@@ -862,8 +868,7 @@ impl<'a> Panel<'a> for CountupPanel {
 
     fn btn2_short(&mut self) -> bool {
         use CountupPanelState::*;
-        let tim = get_gs().perip.TIM3;
-        let timer = tim::Timer(tim);
+        let timer = tim::Timer(&get_gs().perip.TIM3);
         self.state.set(match self.state.get() {
             View => {
                 self.counter.set(0);
@@ -1103,7 +1108,6 @@ impl<'a> GlobalState<'a> {
         }
     }
 
-
     fn systick_handler() {
         let gs = get_gs();
         let mut clk = None;
@@ -1229,7 +1233,7 @@ impl<'a> Timeoutable<'a> for GlobalState<'a> {
     }
 }
 
-exception!(SYS_TICK, GlobalState::systick_handler);
+//exception!(SYS_TICK, GlobalState::systick_handler);
 interrupt!(EXTI4, GlobalState::exti4_handler);
 interrupt!(EXTI3, GlobalState::exti3_handler);
 interrupt!(TIM4, GlobalState::tim4_callback);
@@ -1244,10 +1248,11 @@ const SYSTICK_CYCLE: u32 = 8_000_000;
 
 static mut GS: Option<GlobalState> = None;
 
-fn init_hardware() {
-    let p = unsafe {Peripherals::all()};
-    p.SYST.set_clock_source(cortex_m::peripheral::SystClkSource::Core);
-    p.SYST.set_reload(SYSTICK_CYCLE);
+fn init_hardware() -> (CorePeripherals, Peripherals) {
+    let mut cp = CorePeripherals::take().unwrap();
+    let p = Peripherals::take().unwrap();
+    cp.SYST.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    cp.SYST.set_reload(SYSTICK_CYCLE);
 
     /* RCC */
     /* enable clock for GPIOA, GPIOB and AFIO */
@@ -1289,16 +1294,18 @@ fn init_hardware() {
                            .tr4().set_bit());
 
     /* NVIC */
-    p.NVIC.enable(Interrupt::EXTI3);
-    p.NVIC.enable(Interrupt::EXTI4);
-    p.NVIC.enable(Interrupt::TIM3);
-    p.NVIC.enable(Interrupt::TIM4);
+    cp.NVIC.enable(Interrupt::EXTI3);
+    cp.NVIC.enable(Interrupt::EXTI4);
+    cp.NVIC.enable(Interrupt::TIM3);
+    cp.NVIC.enable(Interrupt::TIM4);
+    return (cp, p)
 }
 
-fn init() {
+fn init(cp: CorePeripherals, p: Peripherals) {
     unsafe {
         GS = Some(GlobalState{
-            perip: Peripherals::all(),
+            core_perip: cp,
+            perip: p,
             btn1: uninitialized(),
             btn2: uninitialized(),
             events: EventTimer::new(),
@@ -1351,8 +1358,8 @@ fn init() {
 
     let gs = get_gs();
 
-    gs.i2c = i2c::I2C(gs.perip.I2C1);
-    gs.disp = ShiftRegister::new(gs.perip.GPIOA, 24);
+    gs.i2c = i2c::I2C(&gs.perip.I2C1);
+    gs.disp = ShiftRegister::new(&gs.perip.GPIOA, 24);
     gs.btn1 = Button::new(&gs.events);
     gs.btn2 = Button::new(&gs.events);
     gs.panels = [&mut gs.time_panel,
@@ -1363,24 +1370,27 @@ fn init() {
                  &mut gs.set_panel];
 
     /* configure I2C */
-    gs.i2c.init(gs.perip.RCC, 0x01, 400_000, i2c::DutyType::DUTY1, true);
+    gs.i2c.init(&gs.perip.RCC, 0x01, 400_000, i2c::DutyType::DUTY1, true);
     //gs.i2c.init(0x01, 100_000, i2c::DutyType::DUTY1, false);
     /* display zeros */
     gs.disp.output_bits(0);
     /* initialize 10ms couting clock */
-    tim::Timer(gs.perip.TIM3).init(10 * (8_000_000 / 1000));
+    tim::Timer(&gs.perip.TIM3).init(10 * (8_000_000 / 1000));
     /* initialize and start 1ms-precision event clock */
-    let tim4 = tim::Timer(gs.perip.TIM4);
+    let tim4 = tim::Timer(&gs.perip.TIM4);
     tim4.init(1 * (8_000_000 / 1000));
     tim4.reset();
     tim4.go();
     /* start systick */
-    gs.perip.SYST.enable_interrupt();
-    gs.perip.SYST.enable_counter();
+    gs.core_perip.SYST.enable_interrupt();
+    gs.core_perip.SYST.enable_counter();
     GlobalState::systick_handler(); /* initialize internal time */
 }
 
-fn main() {
-    init_hardware();
-    init();
+#[entry]
+fn main() -> ! {
+    loop {
+        let (cp, p) = init_hardware();
+        init(cp, p);
+    }
 }
